@@ -26,9 +26,12 @@ let `type` = "keyword as name"
 ### 1.3 字面量
 
 ```gura
-42
-0xff
-3.14
+42          // i64，默认整数字面量类型
+42i32       // i32
+42i64       // i64
+3.14        // f64，默认浮点字面量类型
+3.14f32     // f32
+3.14f64     // f64
 true
 false
 '字'
@@ -38,6 +41,8 @@ false
 """
 none
 ```
+
+当前数值字面量支持十进制整数和带小数点的十进制浮点数；十六进制、二进制、八进制、指数形式和 `_` 分隔符保留给后续扩展。数值后缀是字面量 token 的一部分，`1i32` 与 `1.0f32` 分别表示精确的 `i32` 与 `f32` 字面量；无后缀整数默认为 `i64`，无后缀浮点默认为 `f64`。
 
 `none` 是空值字面量，只能用于显式可空类型 `T?` 或被语言定义为可空的上下文。
 
@@ -66,8 +71,8 @@ Decl ::= FnDecl | StructDecl | EnumDecl | TraitDecl | ImplDecl | TypeAliasDecl |
 ## 4. 变量声明
 
 ```gura
-let x: I64 = 1        // 不可重新绑定
-var y: I64 = 2        // 可重新绑定，具备 var 存储槽能力
+let x: i64 = 1        // 不可重新绑定
+var y: i64 = 2        // 可重新绑定，具备 var 存储槽能力
 let z = x + y         // 类型推导
 ```
 
@@ -89,7 +94,7 @@ Type ::= Capability? TypeAtom
        | Type "|" Type
        | FnType
 
-Capability ::= "mut" | "tmp" | "iso" | "imm" | "paused" | "cown"
+Capability ::= "mut" | "tmp" | "iso" | "imm" | "pau" | "cown"
 TypeAtom ::= Identifier TypeArgs? | "(" TypeList? ")"
 TypeArgs ::= "[" Type ("," Type)* "]"
 FnType ::= "fn" "(" ParamTypes? ")" "->" Type
@@ -102,17 +107,17 @@ mut Node
 iso Tree[String]
 imm List[imm String]
 cown Account
-fn(mut Buffer, imm Bytes) -> Result[Unit, Error]
+fn(mut Buffer, imm Bytes) -> Result[unit, Error]
 ```
 
 ## 6. 函数
 
 ```gura
-fn add(a: I64, b: I64): I64 {
+fn add(a: i64, b: i64): i64 {
     return a + b
 }
 
-fn abs(x: I64): I64 = if x < 0 { -x } else { x }
+fn abs(x: i64): i64 = if x < 0 { -x } else { x }
 ```
 
 ```ebnf
@@ -128,17 +133,17 @@ BlockOrExpr ::= Block | "=" Expr
 
 ```gura
 struct Counter {
-    var value: I64
+    var value: i64
 
     fn inc(self: mut) {
         self.value += 1
     }
 
-    fn get(self: imm): I64 {
+    fn get(self: imm): i64 {
         return self.value
     }
 
-    fn peek(self: paused): I64 {
+    fn peek(self: pau): i64 {
         return self.value
     }
 }
@@ -148,7 +153,7 @@ struct Counter {
 
 - `self: mut` 可读写字段；
 - `self: imm` 只能读取深不可变字段；
-- `self: paused` 只能读取 paused 视图允许读取的字段；
+- `self: pau` 只能读取 paused 视图允许读取的字段；
 - `self: iso` 不可直接解引用，必须通过 `enter` 打开区域；
 - 同名方法可按 `self` 能力重载；
 - 方法调用默认要求 receiver 能力与声明的 `self` 能力匹配，不能把 `mut` receiver 隐式降级为 `paused` 调用；未来若支持 self 能力多态，必须显式声明。
@@ -186,13 +191,13 @@ struct Tree {
 ```gura
 enum Option[T] {
     Some(T)
-    None
+    none
 }
 
-fn unwrap_or(opt: Option[I64], fallback: I64): I64 {
+fn unwrap_or(opt: Option[i64], fallback: i64): i64 {
     match opt {
         case Some(x) => x
-        case None => fallback
+        case none => fallback
     }
 }
 ```
@@ -271,7 +276,7 @@ let x = {
 ### 11.1 active 区域内分配
 
 ```gura
-let node: mut Node[I64] = new mut Node(value: 1, next: none)
+let node: mut Node[i64] = new mut Node(value: 1, next: none)
 ```
 
 `new mut T(...)` 在当前 active 区域分配对象，返回 `mut T`。
@@ -367,7 +372,7 @@ explore users as u {
 }
 ```
 
-`explore x as y { body }` 可理解为：打开 `x` 后立即把被探索区域置为 paused，并在一个词法受限的临时 active 上下文中执行 `body`。块内 `y` 的类型为 `paused T`，不能写入被探索区域，`tmp`/`paused` 引用不能逃逸，返回值限制与 `enter` 相同。因此被探索区域保持不变式稳定。
+`explore x as y { body }` 可理解为：打开 `x` 后立即把被探索区域置为 paused，并在一个词法受限的临时 active 上下文中执行 `body`。块内 `y` 的类型为 `pau T`，不能写入被探索区域，`tmp`/`pau` 引用不能逃逸，返回值限制与 `enter` 相同。因此被探索区域保持不变式稳定。
 
 ### 13.3 freeze
 
@@ -469,15 +474,15 @@ struct LogEntry {
 }
 
 struct Account {
-    var balance: I64
+    var balance: i64
     var logs: mut List[imm LogEntry]
 
-    fn deposit(self: mut, amount: I64) {
+    fn deposit(self: mut, amount: i64) {
         self.balance += amount
         self.logs.push(new imm LogEntry(text: "deposit"))
     }
 
-    fn balance(self: paused): I64 {
+    fn balance(self: pau): i64 {
         return self.balance
     }
 }

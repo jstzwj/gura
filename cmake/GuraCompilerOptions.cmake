@@ -1,0 +1,8 @@
+function(gura_apply_common_options target)
+  target_compile_features(${target} PUBLIC cxx_std_23)
+  if(MSVC)
+    target_compile_options(${target} PRIVATE /W4)
+  else()
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+  endif()
+endfunction()

@@ -94,7 +94,7 @@ SelfParam {
     capability: SelfCapability
 }
 
-SelfCapability = mut | imm | paused | tmp
+SelfCapability = mut | imm | pau | tmp
 ```
 
 `iso self` 不作为普通方法 receiver，必须先 `enter`。
@@ -132,7 +132,7 @@ EnumVariant {
     payload: VariantPayload
 }
 
-VariantPayload = None | Tuple([TypeRef]) | Struct([FieldDecl])
+VariantPayload = none | Tuple([TypeRef]) | Struct([FieldDecl])
 ```
 
 ### 3.4 trait
@@ -315,10 +315,14 @@ Expr =
 
 ```text
 LiteralExpr {
-    literal: Literal
+    kind: LiteralKind
+    value: String      // 原始 token 文本
+    suffix: String?    // i32/i64/f32/f64，若无后缀则为空
 }
 
-Literal = Int | Float | Bool | Char | String | None
+LiteralKind = Integer | Float | bool | none | Char | String
+IntegerLiteral = { value, suffix?: i32 | i64 }
+FloatLiteral = { value, suffix?: f32 | f64 }
 ```
 
 ### 6.2 名称与路径
@@ -350,7 +354,7 @@ ResolvedFieldAccess {
     receiver_type: Type
     declared_field_type: Type
     adapted_type: Type
-    requires_move: Bool
+    requires_move: bool
 }
 ```
 
@@ -468,7 +472,7 @@ EnterInfo {
     bridge_type: Type
     capture_set: [Capture]
     outer_capability_adaptations: [Adaptation]
-    dynamic_open_check: Bool
+    dynamic_open_check: bool
     result_constraint: IsoOrImmOrPure
 }
 ```
@@ -494,7 +498,7 @@ ExploreExpr {
 
 `ExploreExpr` 可以降低成特殊 Region IR，也可脱糖为：打开目标区域为 paused，然后创建临时 active 区域执行 body。
 
-HIR 中 `binding` 类型为 `paused T`。
+HIR 中 `binding` 类型为 `pau T`。
 
 ### 6.11 freeze
 
@@ -702,7 +706,7 @@ EscapeClass =
   | Global
 ```
 
-`mut`、`tmp`、`paused` 的逃逸类别受严格限制。
+`mut`、`tmp`、`pau` 的逃逸类别受严格限制。
 
 ## 12. AST 到 Region IR 示例
 

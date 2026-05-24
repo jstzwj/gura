@@ -1,0 +1,15 @@
+struct Point {
+    let x: i64
+    let y: i64
+}
+
+impl Point {
+    fn sum(self: imm): i64 {
+        return self.x + self.y
+    }
+}
+
+fn main(): i64 {
+    var p: imm Point = new imm Point { x: 1, y: 2 }
+    return p.sum()
+}

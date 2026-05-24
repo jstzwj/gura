@@ -1,0 +1,68 @@
+# Build directories
+/build/
+/build-*/
+/cmake-build-*/
+/out/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+DartConfiguration.tcl
+Testing/
+install_manifest.txt
+compile_commands.json
+
+# Conan generated files
+CMakeUserPresets.json
+conanbuild.*
+conanrun.*
+deactivate_conanbuild.*
+deactivate_conanrun.*
+graph_info.json
+
+# Binaries and libraries
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
+
+# LLVM / compiler outputs
+*.ll
+*.bc
+*.s
+*.asm
+*.ir
+*.gura.dump
+
+# Test and coverage outputs
+*.gcda
+*.gcno
+*.gcov
+coverage/
+test-results/
+
+# Logs
+*.log
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local environment
+.env
+.env.*
+!.env.example

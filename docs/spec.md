@@ -27,7 +27,7 @@ v ::= pure
 `cap` 是引用能力：
 
 ```text
-cap ::= mut | tmp | iso | imm | paused
+cap ::= mut | tmp | iso | imm | pau
 ```
 
 `var` 是存储槽能力，不是值能力。
@@ -81,7 +81,7 @@ RegionFrame ::= (region_id, temp_store, locals)
     | fn(τ*) -> τ
     | Never
 
-K ::= mut | tmp | iso | imm | paused | cown
+K ::= mut | tmp | iso | imm | pau | cown
 S ::= var | field | tmp_slot
 ```
 
@@ -101,9 +101,9 @@ openable(τ)     // 可 enter/explore
 - `copyable(cown T)` 为真；
 - `copyable(iso T)` 为假；
 - `send_safe(iso T | imm T | cown T | pure)` 为真；
-- `send_safe(mut T | tmp T | paused T)` 为假；
+- `send_safe(mut T | tmp T | pau T)` 为假；
 - `return_safe(iso T | imm T | pure)` 为真；
-- `return_safe(mut T | tmp T | paused T)` 默认为假。
+- `return_safe(mut T | tmp T | pau T)` 默认为假。
 
 ## 4. 变量与移动
 
@@ -145,12 +145,29 @@ openable(τ)     // 可 enter/explore
 则：
 
 ```text
-Γ ⊢ place = rhs : Unit ⊣ Γ1[place: Store[var, τ2]]
+Γ ⊢ place = rhs : unit ⊣ Γ1[place: Store[var, τ2]]
 ```
 
 对字段赋值不改变字段声明类型，只要求赋值类型与字段类型兼容。
 
-## 5. 视点适配
+## 5. 原始值类型与数值字面量
+
+Gura 的原始值类型使用小写名称：`i32`、`i64`、`f32`、`f64`、`bool`、`unit`、`none`。
+
+```ebnf
+integer_literal ::= decimal_digits integer_suffix?
+float_literal   ::= decimal_digits "." decimal_digits float_suffix?
+integer_suffix  ::= "i32" | "i64"
+float_suffix    ::= "f32" | "f64"
+```
+
+无后缀整数字面量类型为 `i64`，无后缀浮点字面量类型为 `f64`。数值字面量后缀决定该字面量的精确类型，语言当前不对数值类型做隐式提升或上下文推断；例如 `i32` 返回位置需要写 `0i32`，而不是依赖 `0` 从默认 `i64` 转换。
+
+同类型的 `i32`、`i64`、`f32`、`f64` 可以使用 `+`、`-`、`*`、`/`；`%` 仅适用于同类型的 `i32` 或 `i64`。大小比较要求两侧是同一种数值类型，结果为 `bool`。
+
+十六进制、二进制、八进制、指数形式和 `_` 分隔符保留给后续扩展。
+
+## 6. 视点适配
 
 字段访问判断：
 
@@ -168,10 +185,10 @@ K ⊙ Kf = Kr
 | `K ⊙ Kf` | `mut` | `tmp` | `imm` | `iso` | `paused` |
 | --- | --- | --- | --- | --- | --- |
 | `mut` | `mut` | `⊥` | `imm` | `⊥/iso-place` | `⊥` |
-| `tmp` | `mut` | `tmp` | `imm` | `⊥/iso-place` | `paused` |
+| `tmp` | `mut` | `tmp` | `imm` | `⊥/iso-place` | `pau` |
 | `imm` | `imm` | `imm` | `imm` | `imm` | `imm` |
 | `iso` | `⊥` | `⊥` | `⊥` | `⊥` | `⊥` |
-| `paused` | `paused` | `paused` | `imm` | `⊥/iso-place` | `paused` |
+| `pau` | `pau` | `pau` | `imm` | `⊥/iso-place` | `pau` |
 
 `⊥/iso-place` 表示不能作为普通值读取，但可以作为存储位置参与 `enter *slot`、`move` 或 `swap`。
 
@@ -241,7 +258,7 @@ no_escape(binding_region, Γbody)
 
 进入内层区域时，外层环境中：
 
-- `mut T` -> `paused T`；
+- `mut T` -> `pau T`；
 - `tmp T` -> 不可捕获，除非生命周期严格内嵌且不逃逸；
 - `Store[var, T]` -> `paused Store[T]`；
 - `iso T` 保持 `iso T`，但仍不可复制；
@@ -250,7 +267,7 @@ no_escape(binding_region, Γbody)
 
 ### 7.2 返回限制
 
-`enter` 块不能返回指向其 active 区域内部的 `mut`、`tmp`、`paused` 引用。
+`enter` 块不能返回指向其 active 区域内部的 `mut`、`tmp`、`pau` 引用。
 
 合法：
 
@@ -274,14 +291,14 @@ let leaked = enter tree as t {
 
 ## 8. explore 静态规则
 
-`explore source as binding { body }` 要求 `source: iso T`，块内 `binding: paused T`。动态上，目标区域被打开后立即作为 paused 视图暴露，`body` 在词法受限的临时 active 上下文中执行。
+`explore source as binding { body }` 要求 `source: iso T`，块内 `binding: pau T`。动态上，目标区域被打开后立即作为 paused 视图暴露，`body` 在词法受限的临时 active 上下文中执行。
 
 规则：
 
 - 不能调用 `self: mut` 方法；
 - 不能写入被探索区域；
 - 可以创建 `tmp` 对象保存 paused 引用；
-- `tmp`、`paused` 和指向被探索区域内部的引用不能逃逸；
+- `tmp`、`pau` 和指向被探索区域内部的引用不能逃逸；
 - 返回值必须 `return_safe`；
 - 被探索区域的不变式在整个块内视为稳定。
 

@@ -35,8 +35,8 @@ active 区域是当前线程唯一可变区域。允许：
 
 paused 区域已经打开，但由于更内层区域成为 active 而临时挂起。允许：
 
-- 通过 `paused T` 读取；
-- 调用 `self: paused` 或 `self: imm` 可用的方法；
+- 通过 `pau T` 读取；
+- 调用 `self: pau` 或 `self: imm` 可用的方法；
 - 作为 `tmp` 对象中的临时引用目标。
 
 禁止：
@@ -129,14 +129,14 @@ let frozen: imm Tree = freeze(move tree)
 - `imm` 方法不能观察可变内部状态；
 - 实现层面的引用计数、缓存和延迟初始化必须不破坏程序可见不可变性。
 
-### 4.5 `paused T`
+### 4.5 `pau T`
 
-`paused T` 是 paused 区域中的临时只读视图。
+`pau T` 是 paused 区域中的临时只读视图。
 
 允许：
 
 - 读字段；
-- 调用 `self: paused` 或 `self: imm` 方法；
+- 调用 `self: pau` 或 `self: imm` 方法；
 - 被 `tmp` 对象引用。
 
 禁止：
@@ -172,7 +172,7 @@ acquire account as a {
 
 字段类型不是固定暴露的，而是由接收者能力决定。若表达式 `x` 的能力为 `Kx`，字段声明能力为 `Kf`，则访问 `x.f` 的能力为 `Kx ⊙ Kf`。
 
-| `x` \ `f` | `mut` | `tmp` | `imm` | `iso` | `paused` |
+| `x` \ `f` | `mut` | `tmp` | `imm` | `iso` | `pau` |
 | --- | --- | --- | --- | --- | --- |
 | `mut` | `mut` | 不可直接读 | `imm` | 不可解引用，只能 move/swap | 不可直接读 |
 | `tmp` | `mut` | `tmp` | `imm` | 不可解引用，只能 move/swap | `paused` |
@@ -224,7 +224,7 @@ acquire account as a {
 
 ### 7.2 `explore`
 
-`explore x as y { body }` 以 paused 方式访问区域。目标区域被打开后立即作为 paused 视图暴露，`body` 在词法受限的临时 active 上下文中执行；块内 `y: paused T`，不能写入被探索区域，`tmp`/`paused` 引用不能逃逸，返回值限制与 `enter` 相同。它保证被探索区域不被修改，适合：
+`explore x as y { body }` 以 paused 方式访问区域。目标区域被打开后立即作为 paused 视图暴露，`body` 在词法受限的临时 active 上下文中执行；块内 `y: pau T`，不能写入被探索区域，`tmp`/`pau` 引用不能逃逸，返回值限制与 `enter` 相同。它保证被探索区域不被修改，适合：
 
 - 只读遍历；
 - 查询索引结构；
@@ -337,7 +337,7 @@ acquire read c as value {
 }
 ```
 
-读获取返回 `paused T` 或 `imm-like T`，允许多个读者并发。原型阶段可先只支持写获取。
+读获取返回 `pau T` 或 `imm-like T`，允许多个读者并发。原型阶段可先只支持写获取。
 
 ## 12. 线程与任务边界
 
@@ -351,7 +351,7 @@ acquire read c as value {
 | 纯值 | 复制 |
 | `mut T` | 禁止 |
 | `tmp T` | 禁止 |
-| `paused T` | 禁止 |
+| `pau T` | 禁止 |
 
 这保证新任务不能直接获得其他线程 active 或 paused 区域中的可变对象引用。
 

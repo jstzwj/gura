@@ -1,0 +1,11 @@
+fn main(): i64 {
+    let x: iso Box = new iso Box
+    let frozen = freeze(move x)
+    let y: iso Box = new iso Box
+    let merged = merge(move y)
+    let r: iso Box = new iso Box
+    enter r as b {
+        return 1
+    }
+    return 0
+}

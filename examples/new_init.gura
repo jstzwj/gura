@@ -1,0 +1,9 @@
+struct Point {
+    let x: i64
+    let y: i64
+}
+
+fn main(): i64 {
+    var p: mut Point = new mut Point { x: 1, y: 2 }
+    return p.x + p.y
+}
