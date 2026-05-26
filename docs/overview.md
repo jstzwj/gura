@@ -30,14 +30,144 @@ gura 的核心设计不是“每个对象一个所有者”，而是“每个可
 
 一个线程任意时刻只有一个 active 区域，这称为**单一可变窗口**。打开新的区域时，原 active 区域变成 paused；退出时恢复上一层区域。
 
+#### 3.1.1 region 是什么
+
+region 不是一个普通对象，也不是必须手动传来传去的 runtime handle。它更像是一条对象边界：边界内部的可变对象可以任意互相引用，边界外部不能随便指向内部对象，只能持有当前桥对象的 `iso` 引用。
+
+```gura
+struct Node {
+    var value: i64
+    var next: mut Node?
+}
+
+let list: iso Node = new iso Node(value: 1, next: none)
+```
+
+上面代码创建了一个新的闭合 region：
+
+```text
+closed region R1
+  bridge: Node(value: 1)
+  objects: Node(value: 1)
+
+outside
+  list: iso Node  ---> R1.bridge
+```
+
+`list` 不是“拥有一个 Node 对象”这么简单，而是拥有整个闭合 region `R1`。以后如果这个链表 region 内部有 1000 个节点、环、缓存或索引，外部仍然只通过一个 `iso Node` 持有整个区域。
+
+#### 3.1.2 local region 与 explicit region
+
+线程执行普通代码时有一个隐含的 local region，用来放栈帧和当前可直接使用的局部可变对象。`new mut` 在当前 active region 中分配对象；`new iso` 创建一个新的 explicit closed region。
+
+```gura
+fn build_pair(): iso Pair {
+    let tmp_left: mut Node = new mut Node(value: 1, next: none)
+    let pair: iso Pair = new iso Pair(left: tmp_left, right: new mut Node(value: 2, next: none))
+    return pair
+}
+```
+
+概念上：
+
+```text
+local/active region
+  tmp_left: Node
+
+new iso Pair(...)
+  creates closed region R2
+  bridge: Pair
+  objects moved/created inside R2: Pair, tmp_left, right Node
+
+return value
+  iso Pair ---> R2.bridge
+```
+
+也就是说，`new iso` 的结果不是一个裸对象，而是一个已闭合的 explicit region 的桥引用。
+
+#### 3.1.3 active / paused / closed 的变化
+
+```gura
+var tree: iso Tree = make_tree()
+
+enter tree as root {
+    root.value = 1
+    let child: mut Tree = new mut Tree(value: 2)
+    root.left = child
+}
+```
+
+执行过程可以理解为：
+
+```text
+before enter:
+  local region: active
+  tree region: closed, only accessible through tree: iso Tree
+
+inside enter:
+  tree region: active, root: mut Tree
+  previous local region: paused
+  allocation new mut Tree goes into tree region
+
+退出 enter:
+  tree region: closed again
+  root/child mut references expire
+  tree remains the unique iso bridge reference
+```
+
+这就是单一可变窗口：同一时刻只有树所在 region 可变，外层 region 暂停为只读/不可写状态。
+
+#### 3.1.4 nested region
+
+region 可以嵌套。一个 region 内部可以保存另一个 closed region 的桥对象引用，但不能直接保存对另一个 region 内部普通对象的引用。
+
+```gura
+struct Document {
+    var title: imm String
+    var index: iso Index
+}
+
+let index: iso Index = build_index()
+let doc: iso Document = new iso Document(title: "spec", index: move index)
+```
+
+概念上：
+
+```text
+closed region R_doc
+  bridge: Document
+  field index ---> R_index.bridge
+
+closed region R_index
+  bridge: Index
+  objects: index nodes...
+```
+
+`R_index` 是 `R_doc` 的嵌套子 region。移动 `doc` 时不需要复制 index，只要移动 `R_doc` 的桥引用，整个 region tree 的所有权就一起转移。
+
+#### 3.1.5 什么不属于 region
+
+纯值和深不可变对象不需要可变 region 边界：
+
+```gura
+let n: i64 = 42
+let ok: bool = true
+let name: imm String = new imm String("gura")
+```
+
+这些值可以复制或共享；region 主要管理的是可变对象图的隔离、打开、关闭、转移和回收。
+
 ### 3.2 桥对象 Bridge Object
 
-每个闭合区域有一个桥对象。区域外部只能通过一个外部唯一引用指向该桥对象。区域内部任意对象都可以在退出 `enter` 块时成为新的桥对象。
+每个闭合区域有一个当前桥对象。桥对象把区域具体化为一个可被持有的值：区域外部最多只能有一个引用指向当前桥对象，且闭合区域除当前桥对象外没有其他对象可被区域外部直接引用。区域内部可以有任意对象图，任意区域内对象都可以在退出 `enter` 块时成为新的桥对象。
 
 桥对象提供两个能力：
 
 - 代表整个区域的所有权；
+- 作为打开闭合区域的唯一入口；
 - 允许闭合区域被移动、冻结、合并或放入并发所有者。
+
+在表层语法中没有单独的 `bridge` 关键字。`iso T` 表示“指向某个闭合区域当前桥对象的外部唯一引用”，`enter r as b { ... }` 中的 `b` 是该桥对象在打开区域内的 `mut T` 视图。块结束时，如果 `b` 仍指向同一个区域内的对象，则该对象成为闭合后的当前桥对象；如果没有显式切换，则沿用原桥对象。
 
 ### 3.3 引用能力 Reference Capability
 

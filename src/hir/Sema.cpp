@@ -4,6 +4,8 @@
 
 #include <fmt/format.h>
 
+#include <algorithm>
+#include <memory>
 #include <unordered_set>
 #include <utility>
 
@@ -27,8 +29,37 @@ Type noneType() {
   return Type{Capability::None, "none"};
 }
 
+Type cstringType() {
+  return Type{Capability::None, "cstring"};
+}
+
 Type numericType(std::string name) {
   return Type{Capability::None, std::move(name)};
+}
+
+Type arrayType(Capability capability, Type elementType, std::optional<std::size_t> length = std::nullopt) {
+  Type type;
+  type.capability = capability;
+  type.name = "array";
+  type.isArray = true;
+  type.elementType = std::make_shared<Type>(std::move(elementType));
+  type.arrayLength = length;
+  return type;
+}
+
+std::string typeName(const Type& type) {
+  if (!type.isArray) {
+    return type.name;
+  }
+  const std::string element = type.elementType ? typeName(*type.elementType) : "<invalid>";
+  if (type.arrayLength.has_value()) {
+    return fmt::format("[{}; {}]", element, *type.arrayLength);
+  }
+  return fmt::format("[{}]", element);
+}
+
+bool isPlainI64(const Type& type) {
+  return !type.isArray && type.capability == Capability::None && type.name == "i64";
 }
 
 bool isIntegerType(const Type& type) {
@@ -43,20 +74,43 @@ bool isNumericType(const Type& type) {
   return isIntegerType(type) || isFloatType(type);
 }
 
+bool isRegionStrategy(std::string_view strategy) {
+  return strategy == "Arena" || strategy == "RC" || strategy == "GC" || strategy == "Manual";
+}
+
 bool sameNominalType(const Type& lhs, const Type& rhs) {
-  return lhs.name == rhs.name || lhs.name == "<invalid>" || rhs.name == "<invalid>";
+  if (lhs.name == "<invalid>" || rhs.name == "<invalid>") {
+    return true;
+  }
+  if (lhs.isArray || rhs.isArray) {
+    if (!lhs.isArray || !rhs.isArray || lhs.elementType == nullptr || rhs.elementType == nullptr) {
+      return false;
+    }
+    return sameNominalType(*lhs.elementType, *rhs.elementType);
+  }
+  return lhs.name == rhs.name;
 }
 
 bool isInvalid(const Type& type) {
   return type.name == "<invalid>";
 }
 
+bool containsString(const std::vector<std::string>& values, const std::string& value) {
+  return std::find(values.begin(), values.end(), value) != values.end();
+}
+
+const ast::NameExpr* asNameExpr(const ast::Expr* expr) {
+  return dynamic_cast<const ast::NameExpr*>(expr);
+}
+
 } // namespace
 
 bool Sema::check(const ast::SourceFile& file) {
   collectStructs(file);
+  collectTraits(file);
   collectImplMethods(file);
   collectFunctionSignatures(file);
+  validateTraitImpls(file);
   bool ok = true;
   for (const auto& decl : file.declarations) {
     if (decl == nullptr) {
@@ -111,7 +165,11 @@ void Sema::collectStructs(const ast::SourceFile& file) {
         report(field.span, fmt::format("field '{}' is already defined", field.name));
         continue;
       }
-      info.fields.emplace(field.name, FieldInfo{field.type ? typeFromAst(*field.type) : invalidType(), field.isVar, field.span});
+      Type fieldType = field.type ? typeFromAst(*field.type) : invalidType();
+      if (fieldType.isArray) {
+        report(field.type ? field.type->span : field.span, "array fields are not supported yet");
+      }
+      info.fields.emplace(field.name, FieldInfo{std::move(fieldType), field.isVar, field.span});
     }
     for (const auto& method : structDecl->methods) {
       if (method != nullptr) {
@@ -126,11 +184,40 @@ void Sema::collectStructs(const ast::SourceFile& file) {
   }
 }
 
+void Sema::collectTraits(const ast::SourceFile& file) {
+  traits_.clear();
+  for (const auto& decl : file.declarations) {
+    const auto* traitDecl = dynamic_cast<const ast::TraitDecl*>(decl.get());
+    if (traitDecl == nullptr) {
+      continue;
+    }
+    if (structs_.contains(traitDecl->name)) {
+      report(traitDecl->span, fmt::format("trait '{}' conflicts with a struct of the same name", traitDecl->name));
+      continue;
+    }
+    if (traits_.contains(traitDecl->name)) {
+      report(traitDecl->span, fmt::format("trait '{}' is already defined", traitDecl->name));
+      continue;
+    }
+    TraitInfo info;
+    info.span = traitDecl->span;
+    for (const auto& method : traitDecl->methods) {
+      if (method != nullptr) {
+        collectTraitMethod(info, *method, traitDecl->name);
+      }
+    }
+    traits_.emplace(traitDecl->name, std::move(info));
+  }
+}
+
 void Sema::collectImplMethods(const ast::SourceFile& file) {
   for (const auto& decl : file.declarations) {
     const auto* implDecl = dynamic_cast<const ast::ImplDecl*>(decl.get());
     if (implDecl == nullptr) {
       continue;
+    }
+    if (implDecl->traitName.has_value() && !traits_.contains(*implDecl->traitName)) {
+      report(implDecl->span, fmt::format("trait '{}' is not defined", *implDecl->traitName));
     }
     auto structIt = structs_.find(implDecl->typeName);
     if (structIt == structs_.end()) {
@@ -145,15 +232,15 @@ void Sema::collectImplMethods(const ast::SourceFile& file) {
   }
 }
 
-void Sema::collectMethod(StructInfo& info, const ast::FnDecl& method, const std::string& selfTypeName, bool requireReceiver) {
-  if (info.methods.contains(method.name)) {
-    report(method.span, fmt::format("method '{}' is already defined", method.name));
-    return;
+std::optional<Sema::MethodInfo> Sema::makeMethodInfo(const ast::FnDecl& method, const std::string& selfTypeName, bool requireReceiver) {
+  if (!method.genericParams.empty()) {
+    report(method.span, "generic methods are not supported yet");
+    return std::nullopt;
   }
   const bool hasReceiver = !method.params.empty() && method.params.front().name == "self";
   if (requireReceiver && (!hasReceiver || method.params.front().type == nullptr)) {
     report(method.span, fmt::format("method '{}' must declare self as its first parameter", method.name));
-    return;
+    return std::nullopt;
   }
   MethodInfo methodInfo;
   methodInfo.span = method.span;
@@ -161,7 +248,7 @@ void Sema::collectMethod(StructInfo& info, const ast::FnDecl& method, const std:
   if (hasReceiver) {
     if (method.params.front().type == nullptr) {
       report(method.span, fmt::format("method '{}' must declare self as its first parameter", method.name));
-      return;
+      return std::nullopt;
     }
     methodInfo.receiverType = typeFromAst(*method.params.front().type);
     methodInfo.receiverType.name = selfTypeName;
@@ -172,11 +259,83 @@ void Sema::collectMethod(StructInfo& info, const ast::FnDecl& method, const std:
   for (std::size_t i = firstExplicitParam; i < method.params.size(); ++i) {
     methodInfo.params.push_back(method.params[i].type ? typeFromAst(*method.params[i].type) : invalidType());
   }
-  info.methods.emplace(method.name, std::move(methodInfo));
+  return methodInfo;
+}
+
+void Sema::collectMethod(StructInfo& info, const ast::FnDecl& method, const std::string& selfTypeName, bool requireReceiver) {
+  if (info.methods.contains(method.name)) {
+    report(method.span, fmt::format("method '{}' is already defined", method.name));
+    return;
+  }
+  auto methodInfo = makeMethodInfo(method, selfTypeName, requireReceiver);
+  if (!methodInfo.has_value()) {
+    return;
+  }
+  info.methods.emplace(method.name, std::move(*methodInfo));
+}
+
+void Sema::collectTraitMethod(TraitInfo& info, const ast::FnDecl& method, const std::string& traitName) {
+  if (info.methods.contains(method.name)) {
+    report(method.span, fmt::format("method '{}' is already defined in trait '{}'", method.name, traitName));
+    return;
+  }
+  if (method.body != nullptr) {
+    report(method.span, fmt::format("trait method '{}' must not have a body", method.name));
+    return;
+  }
+  auto methodInfo = makeMethodInfo(method, "<Self>", true);
+  if (!methodInfo.has_value()) {
+    return;
+  }
+  info.methods.emplace(method.name, std::move(*methodInfo));
+}
+
+void Sema::validateTraitImpls(const ast::SourceFile& file) {
+  for (const auto& decl : file.declarations) {
+    const auto* implDecl = dynamic_cast<const ast::ImplDecl*>(decl.get());
+    if (implDecl == nullptr || !implDecl->traitName.has_value()) {
+      continue;
+    }
+    auto traitIt = traits_.find(*implDecl->traitName);
+    auto structIt = structs_.find(implDecl->typeName);
+    if (traitIt == traits_.end() || structIt == structs_.end()) {
+      continue;
+    }
+    std::unordered_map<std::string, const ast::FnDecl*> implMethods;
+    for (const auto& method : implDecl->methods) {
+      if (method == nullptr) {
+        continue;
+      }
+      implMethods.emplace(method->name, method.get());
+    }
+    for (const auto& [methodName, expected] : traitIt->second.methods) {
+      auto implIt = implMethods.find(methodName);
+      if (implIt == implMethods.end()) {
+        report(implDecl->span, fmt::format("impl of trait '{}' for type '{}' is missing method '{}'", *implDecl->traitName, implDecl->typeName, methodName));
+        continue;
+      }
+      auto actual = makeMethodInfo(*implIt->second, implDecl->typeName, true);
+      if (!actual.has_value()) {
+        continue;
+      }
+      if (!sameMethodSignature(expected, *actual)) {
+        report(implIt->second->span, fmt::format("method '{}' signature does not match trait '{}'", methodName, *implDecl->traitName));
+      }
+    }
+    for (const auto& [methodName, method] : implMethods) {
+      if (!traitIt->second.methods.contains(methodName)) {
+        report(method->span, fmt::format("method '{}' is not a member of trait '{}'", methodName, *implDecl->traitName));
+      }
+    }
+  }
 }
 
 void Sema::collectFunctionSignatures(const ast::SourceFile& file) {
   functions_.clear();
+  FunctionSignature puts;
+  puts.returnType = numericType("i32");
+  puts.params.push_back(cstringType());
+  functions_.emplace("puts", std::move(puts));
   for (const auto& decl : file.declarations) {
     const auto* fn = dynamic_cast<const ast::FnDecl*>(decl.get());
     if (fn == nullptr) {
@@ -184,9 +343,17 @@ void Sema::collectFunctionSignatures(const ast::SourceFile& file) {
     }
     FunctionSignature signature;
     signature.span = fn->span;
+    signature.genericParams = fn->genericParams;
     signature.returnType = fn->returnType ? typeFromAst(*fn->returnType) : unitType();
+    if (signature.returnType.isArray) {
+      report(fn->returnType ? fn->returnType->span : fn->span, "array return types are not supported yet");
+    }
     for (const auto& param : fn->params) {
-      signature.params.push_back(param.type ? typeFromAst(*param.type) : invalidType());
+      Type paramType = param.type ? typeFromAst(*param.type) : invalidType();
+      if (paramType.isArray && paramType.capability != Capability::Mut) {
+        report(param.type ? param.type->span : fn->span, "array parameters currently require mut [i64]");
+      }
+      signature.params.push_back(std::move(paramType));
     }
     if (functions_.contains(fn->name)) {
       report(fn->span, fmt::format("function '{}' is already defined", fn->name));
@@ -194,6 +361,52 @@ void Sema::collectFunctionSignatures(const ast::SourceFile& file) {
     }
     functions_.emplace(fn->name, std::move(signature));
   }
+}
+
+Sema::GenericEnv Sema::makeGenericEnv(const ast::FnDecl& fn) {
+  GenericEnv env;
+  for (const auto& param : fn.genericParams) {
+    if (env.contains(param.name)) {
+      report(param.span, fmt::format("generic parameter '{}' is already defined", param.name));
+      continue;
+    }
+    if (structs_.contains(param.name)) {
+      report(param.span, fmt::format("generic parameter '{}' conflicts with a struct of the same name", param.name));
+      continue;
+    }
+    if (isBuiltinTypeName(param.name)) {
+      report(param.span, fmt::format("generic parameter '{}' conflicts with a builtin type name", param.name));
+      continue;
+    }
+    GenericParamInfo info;
+    info.span = param.span;
+    for (const auto& bound : param.bounds) {
+      if (!traits_.contains(bound.name)) {
+        report(bound.span, fmt::format("trait '{}' is not defined", bound.name));
+        continue;
+      }
+      if (containsString(info.bounds, bound.name)) {
+        report(bound.span, fmt::format("trait bound '{}' is repeated for generic parameter '{}'", bound.name, param.name));
+        continue;
+      }
+      info.bounds.push_back(bound.name);
+    }
+    env.emplace(param.name, std::move(info));
+  }
+  return env;
+}
+
+bool Sema::isGenericTypeName(const std::string& name) const {
+  return currentGenericParams_.contains(name);
+}
+
+const Sema::GenericParamInfo* Sema::lookupGenericParam(const std::string& name) const {
+  auto it = currentGenericParams_.find(name);
+  return it == currentGenericParams_.end() ? nullptr : &it->second;
+}
+
+bool Sema::isBuiltinTypeName(const std::string& name) const {
+  return name == "unit" || name == "bool" || name == "none" || name == "i32" || name == "i64" || name == "f32" || name == "f64";
 }
 
 bool Sema::checkDecl(const ast::Decl& decl) {
@@ -205,6 +418,9 @@ bool Sema::checkDecl(const ast::Decl& decl) {
       }
     }
     return ok && !diagnostics_.hasError();
+  }
+  if (dynamic_cast<const ast::TraitDecl*>(&decl) != nullptr) {
+    return !diagnostics_.hasError();
   }
   if (const auto* implDecl = dynamic_cast<const ast::ImplDecl*>(&decl)) {
     bool ok = true;
@@ -224,18 +440,21 @@ bool Sema::checkDecl(const ast::Decl& decl) {
 
 bool Sema::checkFn(const ast::FnDecl& fn) {
   const Type previousReturnType = currentReturnType_;
+  const GenericEnv previousGenericParams = currentGenericParams_;
+  currentGenericParams_ = makeGenericEnv(fn);
   currentReturnType_ = fn.returnType ? typeFromAst(*fn.returnType) : unitType();
   pushScope();
   for (const auto& param : fn.params) {
     if (param.type == nullptr) {
       continue;
     }
-    declare(param.name, BindingState{typeFromAst(*param.type), false, false, param.type->span});
+    declare(param.name, BindingState{typeFromAst(*param.type), false, false, param.type->span, BindingOrigin::Ordinary, regionDepth_});
   }
   if (fn.body != nullptr) {
     checkBlock(*fn.body);
   }
   popScope();
+  currentGenericParams_ = previousGenericParams;
   currentReturnType_ = previousReturnType;
   return !diagnostics_.hasError();
 }
@@ -253,7 +472,7 @@ bool Sema::checkMethod(const ast::FnDecl& fn, const std::string& selfTypeName) {
     if (i == 0 && param.name == "self") {
       paramType.name = selfTypeName;
     }
-    declare(param.name, BindingState{paramType, false, false, param.type->span});
+    declare(param.name, BindingState{paramType, false, false, param.type->span, BindingOrigin::Ordinary, regionDepth_});
   }
   if (fn.body != nullptr) {
     checkBlock(*fn.body);
@@ -282,7 +501,7 @@ Type Sema::checkExpr(const ast::Expr& expr, ValueContext context) {
     case ast::LiteralKind::None: return noneType();
     case ast::LiteralKind::Integer: return numericType(literal->suffix.empty() ? "i64" : literal->suffix);
     case ast::LiteralKind::Float: return numericType(literal->suffix.empty() ? "f64" : literal->suffix);
-    case ast::LiteralKind::String:
+    case ast::LiteralKind::String: return cstringType();
     case ast::LiteralKind::Char: return invalidType();
     }
   }
@@ -297,6 +516,12 @@ Type Sema::checkExpr(const ast::Expr& expr, ValueContext context) {
   }
   if (const auto* field = dynamic_cast<const ast::FieldAccessExpr*>(&expr)) {
     return checkFieldAccess(*field);
+  }
+  if (const auto* array = dynamic_cast<const ast::ArrayLiteralExpr*>(&expr)) {
+    return checkArrayLiteral(*array);
+  }
+  if (const auto* index = dynamic_cast<const ast::IndexExpr*>(&expr)) {
+    return checkIndex(*index);
   }
   if (const auto* binding = dynamic_cast<const ast::BindingExpr*>(&expr)) {
     return checkBinding(*binding);
@@ -373,6 +598,13 @@ Type Sema::checkMove(const ast::MoveExpr& expr) {
 
 Type Sema::checkNew(const ast::NewExpr& expr) {
   Type result = expr.type ? typeFromAst(*expr.type) : invalidType();
+  if (!expr.regionStrategy.empty()) {
+    if (result.capability != Capability::Iso) {
+      report(expr.span, "region allocation strategy requires an iso allocation");
+    } else if (!isRegionStrategy(expr.regionStrategy)) {
+      report(expr.span, fmt::format("unknown region allocation strategy '{}'", expr.regionStrategy));
+    }
+  }
   if (isInvalid(result) || expr.fields.empty()) {
     return result;
   }
@@ -413,9 +645,13 @@ Type Sema::checkBinding(const ast::BindingExpr& expr) {
   Type init = expr.initializer ? checkExpr(*expr.initializer) : unitType();
   Type declared = expr.type ? typeFromAst(*expr.type) : init;
   if (expr.type != nullptr && !sameNominalType(declared, init)) {
-    report(expr.span, fmt::format("initializer type '{}' does not match declared type '{}'", init.name, declared.name));
+    report(expr.span, fmt::format("initializer type '{}' does not match declared type '{}'", typeName(init), typeName(declared)));
   }
-  declare(expr.name, BindingState{declared, expr.isVar, false, expr.span});
+  if (declared.isArray && init.isArray && init.arrayLength.has_value()) {
+    declared.arrayLength = init.arrayLength;
+  }
+  BindingOrigin origin = isRegionLocal(init.capability) && regionDepth_ > 0 ? BindingOrigin::RegionLocal : BindingOrigin::Ordinary;
+  declare(expr.name, BindingState{declared, expr.isVar, false, expr.span, origin, regionDepth_});
   return unitType();
 }
 
@@ -431,6 +667,27 @@ Type Sema::checkAssign(const ast::AssignExpr& expr) {
       report(expr.span, fmt::format("cannot assign to let binding '{}'", name->name));
       return invalidType();
     }
+    if (binding->bridgeSlot) {
+      if (binding->type.capability != Capability::Mut) {
+        report(expr.span, fmt::format("cannot reassign explore bridge '{}'", name->name));
+        return invalidType();
+      }
+      if (value.capability != Capability::Mut) {
+        report(expr.value ? expr.value->span : expr.span, "bridge reassignment requires a mut value");
+        return invalidType();
+      }
+      if (binding->type.name != value.name) {
+        report(expr.value ? expr.value->span : expr.span, "bridge reassignment must preserve bridge type in this milestone");
+        return invalidType();
+      }
+      binding->bridgeReassigned = true;
+      binding->moved = false;
+      return unitType();
+    }
+    if (isRegionLocal(value.capability) && binding->regionDepth < regionDepth_) {
+      report(expr.value ? expr.value->span : expr.span, "region-local value cannot escape its region");
+      return invalidType();
+    }
     if (!sameType(binding->type, value)) {
       report(expr.value ? expr.value->span : expr.span, fmt::format("assignment type '{}' does not match binding type '{}'", value.name, binding->type.name));
       return invalidType();
@@ -441,7 +698,10 @@ Type Sema::checkAssign(const ast::AssignExpr& expr) {
   if (const auto* field = dynamic_cast<const ast::FieldAccessExpr*>(expr.target.get())) {
     return checkFieldAssign(*field, value, expr.value ? expr.value->span : expr.span);
   }
-  report(expr.span, "assignment target must be a binding or field");
+  if (const auto* index = dynamic_cast<const ast::IndexExpr*>(expr.target.get())) {
+    return checkIndexAssign(*index, value, expr.value ? expr.value->span : expr.span);
+  }
+  report(expr.span, "assignment target must be a binding, field, or index");
   return invalidType();
 }
 
@@ -452,6 +712,10 @@ Type Sema::checkFieldAccess(const ast::FieldAccessExpr& expr) {
   }
   if (object.capability == Capability::Iso) {
     report(expr.object ? expr.object->span : expr.span, "cannot access fields through iso without enter");
+    return invalidType();
+  }
+  if (isGenericTypeName(object.name)) {
+    report(expr.span, fmt::format("cannot access field '{}' on generic type '{}'", expr.fieldName, object.name));
     return invalidType();
   }
   const auto structIt = structs_.find(object.name);
@@ -491,7 +755,65 @@ Type Sema::checkFieldAssign(const ast::FieldAccessExpr& target, const Type& valu
     return invalidType();
   }
   if (!sameType(fieldIt->second.type, value)) {
-    report(valueSpan, fmt::format("assignment type '{}' does not match field type '{}'", value.name, fieldIt->second.type.name));
+    report(valueSpan, fmt::format("assignment type '{}' does not match field type '{}'", typeName(value), typeName(fieldIt->second.type)));
+    return invalidType();
+  }
+  return unitType();
+}
+
+Type Sema::checkArrayLiteral(const ast::ArrayLiteralExpr& expr) {
+  if (expr.elements.empty()) {
+    report(expr.span, "cannot infer empty array literal type");
+    return invalidType();
+  }
+  Type element = expr.elements.front() ? checkExpr(*expr.elements.front()) : invalidType();
+  if (!isPlainI64(element)) {
+    report(expr.elements.front() ? expr.elements.front()->span : expr.span, "array literals currently require i64 elements");
+  }
+  for (std::size_t i = 1; i < expr.elements.size(); ++i) {
+    Type current = expr.elements[i] ? checkExpr(*expr.elements[i]) : invalidType();
+    if (!sameType(element, current)) {
+      report(expr.elements[i] ? expr.elements[i]->span : expr.span, "array elements must have matching type");
+    }
+  }
+  return arrayType(Capability::None, std::move(element), expr.elements.size());
+}
+
+Type Sema::checkIndex(const ast::IndexExpr& expr) {
+  Type object = expr.object ? checkExpr(*expr.object, ValueContext::Operand) : invalidType();
+  Type index = expr.index ? checkExpr(*expr.index) : invalidType();
+  if (!isInvalid(index) && !isIntegerType(index)) {
+    report(expr.index ? expr.index->span : expr.span, "array index must be an integer");
+  }
+  if (isInvalid(object)) {
+    return invalidType();
+  }
+  if (!object.isArray || object.elementType == nullptr) {
+    report(expr.object ? expr.object->span : expr.span, "indexing requires an array");
+    return invalidType();
+  }
+  return *object.elementType;
+}
+
+Type Sema::checkIndexAssign(const ast::IndexExpr& target, const Type& value, Span valueSpan) {
+  Type object = target.object ? checkExpr(*target.object, ValueContext::Operand) : invalidType();
+  Type index = target.index ? checkExpr(*target.index) : invalidType();
+  if (!isInvalid(index) && !isIntegerType(index)) {
+    report(target.index ? target.index->span : target.span, "array index must be an integer");
+  }
+  if (isInvalid(object)) {
+    return invalidType();
+  }
+  if (!object.isArray || object.elementType == nullptr) {
+    report(target.object ? target.object->span : target.span, "index assignment requires an array");
+    return invalidType();
+  }
+  if (object.capability != Capability::Mut) {
+    report(target.object ? target.object->span : target.span, "array index assignment requires a mut array");
+    return invalidType();
+  }
+  if (!sameType(*object.elementType, value)) {
+    report(valueSpan, fmt::format("assignment type '{}' does not match array element type '{}'", typeName(value), typeName(*object.elementType)));
     return invalidType();
   }
   return unitType();
@@ -559,6 +881,15 @@ Type Sema::checkCall(const ast::CallExpr& expr) {
     }
     return invalidType();
   }
+  if (!signature->second.genericParams.empty()) {
+    report(callee->span, fmt::format("calling generic function '{}' is not supported yet", callee->name));
+    for (const auto& arg : expr.arguments) {
+      if (arg != nullptr) {
+        checkExpr(*arg);
+      }
+    }
+    return invalidType();
+  }
   if (expr.arguments.size() != signature->second.params.size()) {
     report(expr.span, fmt::format("function '{}' expects {} argument(s) but got {}", callee->name, signature->second.params.size(), expr.arguments.size()));
   }
@@ -570,7 +901,7 @@ Type Sema::checkCall(const ast::CallExpr& expr) {
     Type actual = checkExpr(*expr.arguments[i]);
     const Type& expected = signature->second.params[i];
     if (!sameType(expected, actual)) {
-      report(expr.arguments[i]->span, fmt::format("argument {} type '{}' does not match expected type '{}'", i + 1, actual.name, expected.name));
+      report(expr.arguments[i]->span, fmt::format("argument {} type '{}' does not match expected type '{}'", i + 1, typeName(actual), typeName(expected)));
     }
   }
   for (std::size_t i = checkedCount; i < expr.arguments.size(); ++i) {
@@ -582,9 +913,9 @@ Type Sema::checkCall(const ast::CallExpr& expr) {
 }
 
 Type Sema::checkMethodCall(const ast::CallExpr& expr, const ast::FieldAccessExpr& callee) {
-  const auto* typeName = dynamic_cast<const ast::NameExpr*>(callee.object.get());
-  const bool isTypeLevelCall = typeName != nullptr && structs_.contains(typeName->name) && lookup(typeName->name) == nullptr;
-  Type receiver = isTypeLevelCall ? Type{Capability::None, typeName->name} : (callee.object ? checkExpr(*callee.object, ValueContext::Operand) : invalidType());
+  const auto* typeNameExpr = dynamic_cast<const ast::NameExpr*>(callee.object.get());
+  const bool isTypeLevelCall = typeNameExpr != nullptr && structs_.contains(typeNameExpr->name) && lookup(typeNameExpr->name) == nullptr;
+  Type receiver = isTypeLevelCall ? Type{Capability::None, typeNameExpr->name} : (callee.object ? checkExpr(*callee.object, ValueContext::Operand) : invalidType());
   if (isInvalid(receiver)) {
     for (const auto& arg : expr.arguments) {
       if (arg != nullptr) {
@@ -592,6 +923,9 @@ Type Sema::checkMethodCall(const ast::CallExpr& expr, const ast::FieldAccessExpr
       }
     }
     return invalidType();
+  }
+  if (!isTypeLevelCall && isGenericTypeName(receiver.name)) {
+    return checkGenericMethodCall(expr, callee, receiver);
   }
   const auto structIt = structs_.find(receiver.name);
   if (structIt == structs_.end()) {
@@ -629,7 +963,7 @@ Type Sema::checkMethodCall(const ast::CallExpr& expr, const ast::FieldAccessExpr
     Type actual = checkExpr(*expr.arguments[i]);
     const Type& expected = method.params[i];
     if (!sameType(expected, actual)) {
-      report(expr.arguments[i]->span, fmt::format("argument {} type '{}' does not match expected type '{}'", i + 1, actual.name, expected.name));
+      report(expr.arguments[i]->span, fmt::format("argument {} type '{}' does not match expected type '{}'", i + 1, typeName(actual), typeName(expected)));
     }
   }
   for (std::size_t i = checkedCount; i < expr.arguments.size(); ++i) {
@@ -640,8 +974,76 @@ Type Sema::checkMethodCall(const ast::CallExpr& expr, const ast::FieldAccessExpr
   return method.returnType;
 }
 
+bool Sema::methodArgumentsMatch(const ast::CallExpr& expr, const ast::FieldAccessExpr& callee, const MethodInfo& method) {
+  bool ok = true;
+  if (expr.arguments.size() != method.params.size()) {
+    report(expr.span, fmt::format("method '{}' expects {} argument(s) but got {}", callee.fieldName, method.params.size(), expr.arguments.size()));
+    ok = false;
+  }
+  const std::size_t checkedCount = std::min(expr.arguments.size(), method.params.size());
+  for (std::size_t i = 0; i < checkedCount; ++i) {
+    if (expr.arguments[i] == nullptr) {
+      continue;
+    }
+    Type actual = checkExpr(*expr.arguments[i]);
+    const Type& expected = method.params[i];
+    if (!sameType(expected, actual)) {
+      report(expr.arguments[i]->span, fmt::format("argument {} type '{}' does not match expected type '{}'", i + 1, typeName(actual), typeName(expected)));
+      ok = false;
+    }
+  }
+  for (std::size_t i = checkedCount; i < expr.arguments.size(); ++i) {
+    if (expr.arguments[i] != nullptr) {
+      checkExpr(*expr.arguments[i]);
+    }
+  }
+  return ok;
+}
+
+Type Sema::checkGenericMethodCall(const ast::CallExpr& expr, const ast::FieldAccessExpr& callee, const Type& receiver) {
+  const auto* generic = lookupGenericParam(receiver.name);
+  if (generic == nullptr) {
+    return invalidType();
+  }
+  std::vector<const MethodInfo*> candidates;
+  for (const auto& traitName : generic->bounds) {
+    const auto traitIt = traits_.find(traitName);
+    if (traitIt == traits_.end()) {
+      continue;
+    }
+    const auto methodIt = traitIt->second.methods.find(callee.fieldName);
+    if (methodIt != traitIt->second.methods.end()) {
+      candidates.push_back(&methodIt->second);
+    }
+  }
+  if (candidates.empty()) {
+    report(callee.span, fmt::format("generic type '{}' has no method '{}' in its trait bounds", receiver.name, callee.fieldName));
+    for (const auto& arg : expr.arguments) {
+      if (arg != nullptr) {
+        checkExpr(*arg);
+      }
+    }
+    return invalidType();
+  }
+  const MethodInfo* method = candidates.front();
+  for (std::size_t i = 1; i < candidates.size(); ++i) {
+    if (!sameMethodSignature(*method, *candidates[i])) {
+      report(callee.span, fmt::format("method '{}' is ambiguous for generic type '{}'", callee.fieldName, receiver.name));
+      return invalidType();
+    }
+  }
+  if (method->receiverType.capability != receiver.capability) {
+    report(callee.object ? callee.object->span : callee.span, fmt::format("method '{}' requires a compatible receiver", callee.fieldName));
+  }
+  methodArgumentsMatch(expr, callee, *method);
+  return method->returnType;
+}
+
 Type Sema::checkReturn(const ast::ReturnExpr& expr) {
   Type actual = expr.value ? checkExpr(*expr.value) : unitType();
+  if (regionDepth_ > 0 && isRegionLocal(actual.capability)) {
+    report(expr.span, "region-local value cannot escape its region");
+  }
   if (!sameType(currentReturnType_, actual)) {
     report(expr.span, fmt::format("return type '{}' does not match function return type '{}'", actual.name, currentReturnType_.name));
   }
@@ -677,19 +1079,35 @@ Type Sema::checkWhile(const ast::WhileExpr& expr) {
 }
 
 Type Sema::checkRegion(const ast::RegionExpr& expr) {
-  Type source = expr.source ? checkExpr(*expr.source, ValueContext::Operand) : invalidType();
-  if (source.capability != Capability::Iso) {
-    report(expr.source ? expr.source->span : expr.span, "enter/explore requires an iso region source");
+  const auto* sourceName = asNameExpr(expr.source.get());
+  BindingState* sourceBinding = sourceName != nullptr ? lookup(sourceName->name) : nullptr;
+  Type source = sourceName != nullptr ? checkName(*sourceName, ValueContext::Operand) : invalidType();
+  if (sourceName == nullptr || sourceBinding == nullptr || source.capability != Capability::Iso) {
+    report(expr.source ? expr.source->span : expr.span, "enter/explore source must be an iso binding");
   }
+
+  bool previousMoved = false;
+  if (sourceBinding != nullptr) {
+    previousMoved = sourceBinding->moved;
+    if (!sourceBinding->moved) {
+      sourceBinding->moved = true;
+    }
+  }
+
   ++regionDepth_;
   pushScope();
   if (!expr.bindingName.empty() && !isInvalid(source)) {
     const Capability bindingCapability = expr.kind == ast::RegionExpr::Kind::Enter ? Capability::Mut : Capability::Paused;
-    declare(expr.bindingName, BindingState{Type{bindingCapability, source.name}, false, false, expr.span});
+    declare(expr.bindingName, BindingState{Type{bindingCapability, source.name}, bindingCapability == Capability::Mut, false, expr.span, BindingOrigin::RegionBridge, regionDepth_, true});
   }
   Type result = expr.body ? checkBlock(*expr.body) : unitType();
   popScope();
   --regionDepth_;
+
+  if (sourceBinding != nullptr) {
+    sourceBinding->moved = previousMoved;
+  }
+
   if (isRegionLocal(result.capability)) {
     report(expr.span, "region block cannot return mut/tmp/paused values");
   }
@@ -697,7 +1115,11 @@ Type Sema::checkRegion(const ast::RegionExpr& expr) {
 }
 
 Type Sema::checkFreeze(const ast::FreezeExpr& expr) {
-  Type input = expr.value ? checkExpr(*expr.value, ValueContext::Operand) : invalidType();
+  if (dynamic_cast<const ast::MoveExpr*>(expr.value.get()) == nullptr) {
+    report(expr.value ? expr.value->span : expr.span, "freeze requires move of an iso value");
+    return invalidType();
+  }
+  Type input = checkExpr(*expr.value);
   if (input.capability != Capability::Iso) {
     report(expr.value ? expr.value->span : expr.span, "freeze requires an iso value");
     return invalidType();
@@ -706,7 +1128,14 @@ Type Sema::checkFreeze(const ast::FreezeExpr& expr) {
 }
 
 Type Sema::checkMerge(const ast::MergeExpr& expr) {
-  Type input = expr.value ? checkExpr(*expr.value, ValueContext::Operand) : invalidType();
+  if (dynamic_cast<const ast::MoveExpr*>(expr.value.get()) == nullptr) {
+    report(expr.value ? expr.value->span : expr.span, "merge requires move of an iso value");
+    return invalidType();
+  }
+  if (regionDepth_ == 0) {
+    report(expr.span, "merge requires an active region");
+  }
+  Type input = checkExpr(*expr.value);
   if (input.capability != Capability::Iso) {
     report(expr.value ? expr.value->span : expr.span, "merge requires an iso value");
     return invalidType();
@@ -714,7 +1143,17 @@ Type Sema::checkMerge(const ast::MergeExpr& expr) {
   return Type{Capability::Mut, input.name};
 }
 
-Type Sema::typeFromAst(const ast::TypeRef& type) const {
+Type Sema::typeFromAst(const ast::TypeRef& type) {
+  if (type.isArray) {
+    Type element = type.elementType ? typeFromAst(*type.elementType) : invalidType();
+    if (element.isArray) {
+      report(type.elementType ? type.elementType->span : type.span, "nested arrays are not supported yet");
+    }
+    if (!isPlainI64(element)) {
+      report(type.elementType ? type.elementType->span : type.span, "arrays currently support only i64 elements");
+    }
+    return arrayType(capabilityFromAst(type.capability), std::move(element));
+  }
   return Type{capabilityFromAst(type.capability), type.name};
 }
 
@@ -735,11 +1174,45 @@ bool Sema::isRegionLocal(Capability capability) const {
   return capability == Capability::Mut || capability == Capability::Tmp || capability == Capability::Paused;
 }
 
+bool Sema::isRegionLocalBinding(const BindingState& binding) const {
+  return binding.origin == BindingOrigin::RegionBridge || binding.origin == BindingOrigin::RegionLocal || isRegionLocal(binding.type.capability);
+}
+
 bool Sema::sameType(const Type& lhs, const Type& rhs) const {
   if (isInvalid(lhs) || isInvalid(rhs)) {
     return true;
   }
-  return lhs.capability == rhs.capability && lhs.name == rhs.name;
+  if (lhs.capability != rhs.capability) {
+    return false;
+  }
+  if (lhs.isArray || rhs.isArray) {
+    if (!lhs.isArray || !rhs.isArray || lhs.elementType == nullptr || rhs.elementType == nullptr) {
+      return false;
+    }
+    if (!sameType(*lhs.elementType, *rhs.elementType)) {
+      return false;
+    }
+    return !lhs.arrayLength.has_value() || !rhs.arrayLength.has_value() || lhs.arrayLength == rhs.arrayLength;
+  }
+  return lhs.name == rhs.name;
+}
+
+bool Sema::sameMethodSignature(const MethodInfo& expected, const MethodInfo& actual) const {
+  if (expected.hasReceiver != actual.hasReceiver) {
+    return false;
+  }
+  if (expected.hasReceiver && expected.receiverType.capability != actual.receiverType.capability) {
+    return false;
+  }
+  if (expected.params.size() != actual.params.size()) {
+    return false;
+  }
+  for (std::size_t i = 0; i < expected.params.size(); ++i) {
+    if (!sameType(expected.params[i], actual.params[i])) {
+      return false;
+    }
+  }
+  return sameType(expected.returnType, actual.returnType);
 }
 
 void Sema::report(Span span, std::string message) {

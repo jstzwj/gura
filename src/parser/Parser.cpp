@@ -97,6 +97,9 @@ ast::Ptr<ast::Decl> Parser::parseDecl() {
   if (at(TokenKind::KwStruct)) {
     return parseStructDecl();
   }
+  if (at(TokenKind::KwTrait)) {
+    return parseTraitDecl();
+  }
   if (at(TokenKind::KwImpl)) {
     return parseImplDecl();
   }
@@ -104,7 +107,7 @@ ast::Ptr<ast::Decl> Parser::parseDecl() {
   return nullptr;
 }
 
-ast::Ptr<ast::FnDecl> Parser::parseFnDecl() {
+ast::Ptr<ast::FnDecl> Parser::parseFnDecl(bool requireBody) {
   const auto begin = advance().span.begin;
   auto fn = std::make_unique<ast::FnDecl>();
   fn->id = nextNodeId();
@@ -113,6 +116,9 @@ ast::Ptr<ast::FnDecl> Parser::parseFnDecl() {
     return fn;
   }
   fn->name = advance().text;
+  if (at(TokenKind::LBracket)) {
+    fn->genericParams = parseGenericParams();
+  }
   expect(TokenKind::LParen, "expected '(' after function name");
   if (!at(TokenKind::RParen)) {
     do {
@@ -131,9 +137,47 @@ ast::Ptr<ast::FnDecl> Parser::parseFnDecl() {
   if (consume(TokenKind::Colon)) {
     fn->returnType = parseTypeRef();
   }
-  fn->body = parseBlock();
-  fn->span = Span{begin, fn->body ? fn->body->span.end : peek().span.end};
+  if (requireBody || at(TokenKind::LBrace)) {
+    fn->body = parseBlock();
+  }
+  fn->span = Span{begin, fn->body ? fn->body->span.end : peek().span.begin};
   return fn;
+}
+
+std::vector<ast::GenericParam> Parser::parseGenericParams() {
+  std::vector<ast::GenericParam> params;
+  expect(TokenKind::LBracket, "expected '[' before generic parameter list");
+  if (!at(TokenKind::RBracket)) {
+    do {
+      params.push_back(parseGenericParam());
+    } while (consume(TokenKind::Comma));
+  }
+  expect(TokenKind::RBracket, "expected ']' after generic parameter list");
+  return params;
+}
+
+ast::GenericParam Parser::parseGenericParam() {
+  ast::GenericParam param;
+  param.span.begin = peek().span.begin;
+  if (!at(TokenKind::Identifier)) {
+    diagnostics_.error(peek().span, "expected generic parameter name");
+    return param;
+  }
+  param.name = advance().text;
+  expect(TokenKind::Colon, "expected ':' after generic parameter name");
+  do {
+    ast::TraitBound bound;
+    bound.span.begin = peek().span.begin;
+    if (!at(TokenKind::Identifier)) {
+      diagnostics_.error(peek().span, "expected trait bound name");
+      break;
+    }
+    bound.name = advance().text;
+    bound.span.end = peek().span.begin;
+    param.bounds.push_back(std::move(bound));
+  } while (consume(TokenKind::Plus));
+  param.span.end = param.bounds.empty() ? peek().span.begin : param.bounds.back().span.end;
+  return param;
 }
 
 ast::Ptr<ast::StructDecl> Parser::parseStructDecl() {
@@ -160,6 +204,31 @@ ast::Ptr<ast::StructDecl> Parser::parseStructDecl() {
   return decl;
 }
 
+ast::Ptr<ast::TraitDecl> Parser::parseTraitDecl() {
+  const auto begin = advance().span.begin;
+  auto decl = std::make_unique<ast::TraitDecl>();
+  decl->id = nextNodeId();
+  if (!at(TokenKind::Identifier)) {
+    diagnostics_.error(peek().span, "expected trait name");
+    return decl;
+  }
+  decl->name = advance().text;
+  expect(TokenKind::LBrace, "expected '{' after trait name");
+  while (!at(TokenKind::RBrace) && !at(TokenKind::EndOfFile)) {
+    if (!at(TokenKind::KwFn)) {
+      diagnostics_.error(peek().span, "expected method signature");
+      advance();
+      continue;
+    }
+    decl->methods.push_back(parseFnDecl(false));
+    consume(TokenKind::Semicolon);
+  }
+  const auto end = peek().span.end;
+  expect(TokenKind::RBrace, "expected '}' after trait body");
+  decl->span = Span{begin, end};
+  return decl;
+}
+
 ast::Ptr<ast::ImplDecl> Parser::parseImplDecl() {
   const auto begin = advance().span.begin;
   auto decl = std::make_unique<ast::ImplDecl>();
@@ -168,8 +237,20 @@ ast::Ptr<ast::ImplDecl> Parser::parseImplDecl() {
     diagnostics_.error(peek().span, "expected impl type name");
     return decl;
   }
-  decl->typeName = advance().text;
-  expect(TokenKind::LBrace, "expected '{' after impl type name");
+  std::string firstName = advance().text;
+  if (at(TokenKind::Identifier) && peek().text == "for") {
+    decl->traitName = std::move(firstName);
+    advance();
+    if (!at(TokenKind::Identifier)) {
+      diagnostics_.error(peek().span, "expected impl target type name");
+      return decl;
+    }
+    decl->typeName = advance().text;
+    expect(TokenKind::LBrace, "expected '{' after impl target type name");
+  } else {
+    decl->typeName = std::move(firstName);
+    expect(TokenKind::LBrace, "expected '{' after impl type name");
+  }
   while (!at(TokenKind::RBrace) && !at(TokenKind::EndOfFile)) {
     if (!at(TokenKind::KwFn)) {
       diagnostics_.error(peek().span, "expected method declaration");
@@ -217,6 +298,13 @@ ast::Ptr<ast::TypeRef> Parser::parseTypeRef() {
   case TokenKind::KwPau: type->capability = ast::Capability::Paused; advance(); break;
   case TokenKind::KwCown: type->capability = ast::Capability::Cown; advance(); break;
   default: break;
+  }
+  if (consume(TokenKind::LBracket)) {
+    type->isArray = true;
+    type->elementType = parseTypeRef();
+    expect(TokenKind::RBracket, "expected ']' after array element type");
+    type->span.end = peek().span.begin;
+    return type;
   }
   if (!at(TokenKind::Identifier)) {
     if (type->capability != ast::Capability::None) {
@@ -267,8 +355,8 @@ ast::Ptr<ast::Expr> Parser::parseAssignExpr() {
   if (!consume(TokenKind::Equal)) {
     return lhs;
   }
-  if (dynamic_cast<ast::NameExpr*>(lhs.get()) == nullptr && dynamic_cast<ast::FieldAccessExpr*>(lhs.get()) == nullptr) {
-    diagnostics_.error(lhs ? lhs->span : peek().span, "assignment target must be a binding or field");
+  if (dynamic_cast<ast::NameExpr*>(lhs.get()) == nullptr && dynamic_cast<ast::FieldAccessExpr*>(lhs.get()) == nullptr && dynamic_cast<ast::IndexExpr*>(lhs.get()) == nullptr) {
+    diagnostics_.error(lhs ? lhs->span : peek().span, "assignment target must be a binding, field, or index");
   }
   auto assign = std::make_unique<ast::AssignExpr>();
   assign->id = nextNodeId();
@@ -329,7 +417,7 @@ ast::Ptr<ast::Expr> Parser::parseBindingExpr() {
 
 ast::Ptr<ast::Expr> Parser::parsePostfixExpr() {
   auto expr = parsePrimaryExpr();
-  while (expr && (at(TokenKind::LParen) || at(TokenKind::Dot))) {
+  while (expr && (at(TokenKind::LParen) || at(TokenKind::Dot) || at(TokenKind::LBracket))) {
     if (at(TokenKind::LParen)) {
       auto call = std::make_unique<ast::CallExpr>();
       call->id = nextNodeId();
@@ -338,6 +426,18 @@ ast::Ptr<ast::Expr> Parser::parsePostfixExpr() {
       call->arguments = parseCallArguments();
       call->span.end = peek().span.begin;
       expr = std::move(call);
+      continue;
+    }
+    if (consume(TokenKind::LBracket)) {
+      auto index = std::make_unique<ast::IndexExpr>();
+      index->id = nextNodeId();
+      index->span.begin = expr->span.begin;
+      index->object = std::move(expr);
+      index->index = parseExpr();
+      const auto end = peek().span.end;
+      expect(TokenKind::RBracket, "expected ']' after index expression");
+      index->span.end = end;
+      expr = std::move(index);
       continue;
     }
     advance();
@@ -383,6 +483,21 @@ ast::Ptr<ast::Expr> Parser::parsePrimaryExpr() {
   }
   if (at(TokenKind::LBrace)) {
     return parseBlock();
+  }
+  if (at(TokenKind::LBracket)) {
+    const auto begin = advance().span.begin;
+    auto array = std::make_unique<ast::ArrayLiteralExpr>();
+    array->id = nextNodeId();
+    array->span.begin = begin;
+    if (!at(TokenKind::RBracket)) {
+      do {
+        array->elements.push_back(parseExpr());
+      } while (consume(TokenKind::Comma));
+    }
+    const auto end = peek().span.end;
+    expect(TokenKind::RBracket, "expected ']' after array literal");
+    array->span.end = end;
+    return array;
   }
   if (consume(TokenKind::LParen)) {
     auto expr = parseExpr();
@@ -430,7 +545,36 @@ ast::Ptr<ast::Expr> Parser::parseNewExpr() {
   const auto begin = advance().span.begin;
   auto newExpr = std::make_unique<ast::NewExpr>();
   newExpr->id = nextNodeId();
-  newExpr->type = parseTypeRef();
+  newExpr->type = std::make_unique<ast::TypeRef>();
+  newExpr->type->id = nextNodeId();
+  newExpr->type->span.begin = peek().span.begin;
+  switch (peek().kind) {
+  case TokenKind::KwMut: newExpr->type->capability = ast::Capability::Mut; advance(); break;
+  case TokenKind::KwTmp: newExpr->type->capability = ast::Capability::Tmp; advance(); break;
+  case TokenKind::KwIso: newExpr->type->capability = ast::Capability::Iso; advance(); break;
+  case TokenKind::KwImm: newExpr->type->capability = ast::Capability::Imm; advance(); break;
+  case TokenKind::KwPau: newExpr->type->capability = ast::Capability::Paused; advance(); break;
+  case TokenKind::KwCown: newExpr->type->capability = ast::Capability::Cown; advance(); break;
+  default: break;
+  }
+  if (consume(TokenKind::Less)) {
+    if (newExpr->type->capability != ast::Capability::Iso) {
+      diagnostics_.error(peek().span, "region allocation strategy requires 'iso'");
+    }
+    if (!at(TokenKind::Identifier)) {
+      diagnostics_.error(peek().span, "expected region allocation strategy name");
+    } else {
+      newExpr->regionStrategy = advance().text;
+    }
+    expect(TokenKind::Greater, "expected '>' after region allocation strategy");
+  }
+  if (!at(TokenKind::Identifier)) {
+    diagnostics_.error(peek().span, "expected type name");
+  } else {
+    newExpr->type->name = advance().text;
+  }
+  newExpr->type->optional = consume(TokenKind::Question);
+  newExpr->type->span.end = peek().span.begin;
   if (at(TokenKind::LParen)) {
     parseCallArguments();
   }
@@ -522,12 +666,12 @@ ast::Ptr<ast::Expr> Parser::parseRegionExpr(ast::RegionExpr::Kind kind) {
   region->id = nextNodeId();
   region->kind = kind;
   region->source = parseExpr();
-  if (consume(TokenKind::KwAs)) {
-    if (!at(TokenKind::Identifier)) {
-      diagnostics_.error(peek().span, "expected region binding name");
-    } else {
-      region->bindingName = advance().text;
-    }
+  if (!consume(TokenKind::KwAs)) {
+    diagnostics_.error(peek().span, "expected 'as' before region binding name");
+  } else if (!at(TokenKind::Identifier)) {
+    diagnostics_.error(peek().span, "expected region binding name");
+  } else {
+    region->bindingName = advance().text;
   }
   region->body = parseBlock();
   region->span = Span{begin, region->body ? region->body->span.end : peek().span.end};

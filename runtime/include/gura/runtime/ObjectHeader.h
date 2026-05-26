@@ -16,6 +16,7 @@ struct ObjectHeader {
   RegionId regionId = 0;
   TypeId typeId = 0;
   std::uint32_t flags = ObjectFlagNone;
+  std::uint32_t reserved = 0;
 };
 
 } // namespace gura::runtime

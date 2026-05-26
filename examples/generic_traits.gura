@@ -1,0 +1,11 @@
+trait Named {
+    fn name(self: imm): i64
+}
+
+trait Tagged {
+    fn tag(self: imm): i64
+}
+
+fn describe[T: Named + Tagged](value: imm T): i64 {
+    return value.name() + value.tag()
+}

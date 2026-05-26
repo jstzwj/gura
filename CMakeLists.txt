@@ -85,9 +85,15 @@ if(BUILD_TESTING)
     tests/parser/parse_minimal_fn_test.cpp
     tests/runtime/region_runtime_test.cpp
     tests/codegen/codegen_basic_test.cpp
+    tests/codegen/codegen_array_test.cpp
     tests/codegen/codegen_loop_test.cpp
+    tests/codegen/codegen_struct_test.cpp
+    tests/codegen/codegen_field_assign_test.cpp
+    tests/codegen/codegen_method_test.cpp
+    tests/codegen/codegen_associated_function_test.cpp
     tests/parser/parse_core_exprs_test.cpp
     tests/parser/parse_call_binary_test.cpp
+    tests/parser/parse_array_test.cpp
     tests/parser/parse_if_expr_test.cpp
     tests/parser/parse_assignment_test.cpp
     tests/parser/parse_while_expr_test.cpp
@@ -95,8 +101,10 @@ if(BUILD_TESTING)
     tests/parser/parse_new_init_test.cpp
     tests/parser/parse_method_test.cpp
     tests/parser/parse_impl_method_test.cpp
+    tests/parser/parse_trait_test.cpp
     tests/sema/sema_core_language_test.cpp
     tests/sema/sema_call_binary_test.cpp
+    tests/sema/sema_array_test.cpp
     tests/sema/sema_if_expr_test.cpp
     tests/sema/sema_assignment_test.cpp
     tests/sema/sema_while_expr_test.cpp
@@ -106,10 +114,46 @@ if(BUILD_TESTING)
     tests/sema/sema_method_test.cpp
     tests/sema/sema_impl_method_test.cpp
     tests/sema/sema_associated_function_test.cpp
+    tests/sema/sema_trait_test.cpp
   )
   target_link_libraries(gura_tests PRIVATE gura_lexer gura_parser gura_hir gura_codegen_llvm gura_runtime Catch2::Catch2WithMain)
   gura_apply_common_options(gura_tests)
   list(APPEND CMAKE_MODULE_PATH ${Catch2_SOURCE_DIR}/extras)
   include(Catch)
   catch_discover_tests(gura_tests)
+
+  find_program(GURA_CLANGXX clang++)
+  if(GURA_CLANGXX)
+    add_test(
+      NAME gura_build_return0
+      COMMAND $<TARGET_FILE:gura> build ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/return0.gura -o ${CMAKE_CURRENT_BINARY_DIR}/return0
+    )
+    set_tests_properties(gura_build_return0 PROPERTIES ENVIRONMENT "GURA_CLANG=${GURA_CLANGXX}")
+    add_test(NAME gura_run_return0 COMMAND ${CMAKE_CURRENT_BINARY_DIR}/return0)
+    set_tests_properties(gura_run_return0 PROPERTIES DEPENDS gura_build_return0)
+
+    add_test(
+      NAME gura_build_hello
+      COMMAND $<TARGET_FILE:gura> build ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/hello.gura -o ${CMAKE_CURRENT_BINARY_DIR}/hello
+    )
+    set_tests_properties(gura_build_hello PROPERTIES ENVIRONMENT "GURA_CLANG=${GURA_CLANGXX}")
+    add_test(NAME gura_run_hello COMMAND ${CMAKE_CURRENT_BINARY_DIR}/hello)
+    set_tests_properties(gura_run_hello PROPERTIES DEPENDS gura_build_hello PASS_REGULAR_EXPRESSION "hello")
+
+    add_test(
+      NAME gura_build_array_swap
+      COMMAND $<TARGET_FILE:gura> build ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/array_swap.gura -o ${CMAKE_CURRENT_BINARY_DIR}/array_swap
+    )
+    set_tests_properties(gura_build_array_swap PROPERTIES ENVIRONMENT "GURA_CLANG=${GURA_CLANGXX}")
+    add_test(NAME gura_run_array_swap COMMAND ${CMAKE_CURRENT_BINARY_DIR}/array_swap)
+    set_tests_properties(gura_run_array_swap PROPERTIES DEPENDS gura_build_array_swap)
+
+    add_test(
+      NAME gura_build_array_param_swap
+      COMMAND $<TARGET_FILE:gura> build ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/array_param_swap.gura -o ${CMAKE_CURRENT_BINARY_DIR}/array_param_swap
+    )
+    set_tests_properties(gura_build_array_param_swap PROPERTIES ENVIRONMENT "GURA_CLANG=${GURA_CLANGXX}")
+    add_test(NAME gura_run_array_param_swap COMMAND ${CMAKE_CURRENT_BINARY_DIR}/array_param_swap)
+    set_tests_properties(gura_run_array_param_swap PROPERTIES DEPENDS gura_build_array_param_swap)
+  endif()
 endif()

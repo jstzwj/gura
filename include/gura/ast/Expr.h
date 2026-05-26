@@ -45,6 +45,15 @@ struct FieldAccessExpr : Expr {
   std::string fieldName;
 };
 
+struct ArrayLiteralExpr : Expr {
+  List<Expr> elements;
+};
+
+struct IndexExpr : Expr {
+  Ptr<Expr> object;
+  Ptr<Expr> index;
+};
+
 struct BindingExpr : Expr {
   bool isVar = false;
   std::string name;
@@ -63,6 +72,7 @@ struct FieldInit : Node {
 
 struct NewExpr : Expr {
   Ptr<TypeRef> type;
+  std::string regionStrategy;
   std::vector<FieldInit> fields;
 };
 

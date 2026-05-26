@@ -5,6 +5,7 @@
 #include "gura/lexer/Token.h"
 
 #include <span>
+#include <vector>
 
 namespace gura {
 
@@ -22,9 +23,12 @@ private:
   void expect(TokenKind kind, std::string message);
 
   ast::Ptr<ast::Decl> parseDecl();
-  ast::Ptr<ast::FnDecl> parseFnDecl();
+  ast::Ptr<ast::FnDecl> parseFnDecl(bool requireBody = true);
   ast::Ptr<ast::StructDecl> parseStructDecl();
+  ast::Ptr<ast::TraitDecl> parseTraitDecl();
   ast::Ptr<ast::ImplDecl> parseImplDecl();
+  std::vector<ast::GenericParam> parseGenericParams();
+  ast::GenericParam parseGenericParam();
   ast::FieldDecl parseFieldDecl();
   ast::Ptr<ast::TypeRef> parseTypeRef();
   ast::Ptr<ast::BlockExpr> parseBlock();

@@ -284,7 +284,7 @@ let node: mut Node[i64] = new mut Node(value: 1, next: none)
 ### 11.2 创建新闭合区域
 
 ```gura
-let tree: iso Tree = new iso[Arena] Tree(label: "root", left: none, right: none)
+let tree: iso Tree = new iso<Arena> Tree(label: "root", left: none, right: none)
 ```
 
 `new iso T(...)` 创建一个新闭合区域，其桥对象类型为 `T`，返回 `iso T`。
@@ -292,12 +292,12 @@ let tree: iso Tree = new iso[Arena] Tree(label: "root", left: none, right: none)
 可选内存管理策略：
 
 ```gura
-new iso[Arena] RequestArena()
-new iso[RC] Graph()
-new iso[GC] ObjectGraph()
+new iso<Arena> RequestArena()
+new iso<RC> Graph()
+new iso<GC> ObjectGraph()
 ```
 
-策略省略时默认为实现定义，建议原型期使用 `Arena`。
+策略省略时默认为实现定义，建议原型期使用 `Arena`。`Manual` 可作为显式策略，但安全代码只支持消费唯一 `iso` 后释放整个区域；逐对象手动释放需要 unsafe 或线性证明，不能作为普通安全 `free(obj)` 使用。
 
 ### 11.3 临时对象
 
@@ -352,13 +352,62 @@ enter tree as root {
 }
 ```
 
+`enter source as bridge { body }` 中的 `bridge` 不是关键字，而是用户声明的绑定名。它表示被打开区域当前桥对象的块内视图，类型为 `mut T`。闭合区域外部只能通过 `source: iso T` 指向这个桥对象；区域打开后，桥对象和区域内其他对象一样可变。
+
 进入规则：
 
 - 输入必须是 `iso T`，或能通过存储槽读到 `iso T`；
-- 块内 `root` 类型为 `mut T`；
+- 块内 `bridge` 类型为 `mut T`；
 - 外层 active 区域中的 `mut`、`tmp`、`var` 捕获变量变为 `paused` 视图；
 - 块返回值只能是 `iso`、`imm` 或不含 active 区域引用的纯值；
-- 块结束时所有指向该区域内部非桥对象的局部引用失效。
+- 块结束时所有指向该区域内部非桥对象的局部引用失效；
+- 块结束时必须能解析出一个新的当前桥对象；如果没有显式切换，则沿用进入时的桥对象。
+
+#### 13.1.1 桥对象切换
+
+桥对象可以在 `enter` 块内切换为同一区域中的另一个对象。推荐写法是让 `as` 绑定成为一个可强更新的桥槽：
+
+```gura
+struct List {
+    var head: imm String
+}
+
+struct Cursor {
+    var current: mut List
+}
+
+var list: iso List = new iso List(head: "a")
+
+enter list as bridge {
+    let cursor: mut Cursor = new mut Cursor(current: bridge)
+    bridge = cursor
+}
+
+// list 的静态类型现在是 iso Cursor；它仍代表同一个闭合区域，但当前桥对象变成 cursor。
+```
+
+桥切换规则：
+
+- 新桥对象必须属于当前 active 区域；
+- 新桥对象不能是 `tmp`，因为 `tmp` 会在块结束时失效；
+- 新桥对象不能来自外层 paused 区域，也不能是另一个闭合区域的 `iso` 桥；
+- 切换桥对象只改变闭合区域的外部入口，不复制或移动区域内对象；
+- 如果桥对象类型改变，打开源必须是可强更新位置，例如 `var list: iso List`，这样块结束后外层存储槽可更新为新的 `iso Cursor`；不可写的 `let` 绑定只能沿用兼容的桥类型。
+
+#### 13.1.2 通过字段或槽打开
+
+当 `enter` 的源是字段、索引或暂停区域中的桥槽时，编译器可能无法静态证明目标区域尚未打开，需要插入动态检查。
+
+```gura
+explore map as m {
+    let slot: pau Store[iso Value] = m.get(key)
+    enter *slot as value {
+        value.touch()
+    }
+}
+```
+
+这里 `*slot` 表示从可打开的桥槽中打开其 `iso Value`。如果该区域已经在当前区域栈中，`enter` 必须确定性失败，而不是形成重复打开。
 
 ### 13.2 explore
 
@@ -488,7 +537,7 @@ struct Account {
 }
 
 fn main() {
-    let acc = new iso[RC] Account(balance: 0, logs: new mut List())
+    let acc = new iso<RC> Account(balance: 0, logs: new mut List())
     let shared = cown(move acc)
 
     acquire shared as a {

@@ -48,6 +48,8 @@ region ::= Region(region_id, store, bridge_id, strategy)
 store ::= object_id -> object
 ```
 
+`bridge_id` 是闭合区域的当前桥对象。闭合区域满足：除 `bridge_id` 外，区域内对象没有来自区域外的直接可变引用；`bridge_id` 至多有一个区域外引用。这个外部唯一引用的静态类型写作 `iso T`，其中 `T` 是当前桥对象的对象类型。
+
 ### 2.4 配置
 
 ```text
@@ -180,7 +182,7 @@ K ⊙ Kf = Kr
 
 若 `K ⊙ Kf = ⊥`，字段不可访问。
 
-### 5.1 适配表
+### 6.1 适配表
 
 | `K ⊙ Kf` | `mut` | `tmp` | `imm` | `iso` | `paused` |
 | --- | --- | --- | --- | --- | --- |
@@ -192,9 +194,9 @@ K ⊙ Kf = Kr
 
 `⊥/iso-place` 表示不能作为普通值读取，但可以作为存储位置参与 `enter *slot`、`move` 或 `swap`。
 
-## 6. 对象分配
+## 7. 对象分配
 
-### 6.1 new mut
+### 7.1 new mut
 
 ```text
 Γ ⊢ args : fields(T) ⊣ Γ'
@@ -204,7 +206,7 @@ active_region_exists
 
 效果：对象加入 active 区域。
 
-### 6.2 new tmp
+### 7.2 new tmp
 
 ```text
 Γ ⊢ new tmp T(args) : tmp T
@@ -212,14 +214,14 @@ active_region_exists
 
 限制：只能在区域块内出现；结果不得逃逸。
 
-### 6.3 new iso
+### 7.3 new iso
 
 ```text
 Γ ⊢ args : iso_constructor_args(T) ⊣ Γ'
-Γ ⊢ new iso[S] T(args) : iso T ⊣ Γ'
+Γ ⊢ new iso<S> T(args) : iso T ⊣ Γ'
 ```
 
-效果：创建新 closed 区域，桥对象为 `T`，内存策略为 `S`。
+效果：创建新 closed 区域，桥对象为 `T`，内存策略为 `S`。`S` 属于 `Arena | RC | GC | Manual`；省略策略时由实现选择默认策略。安全语义只允许消费唯一 `iso` 后释放整个区域，`Manual` 的逐对象释放必须处于 unsafe 或线性证明约束下。
 
 构造参数允许：
 
@@ -228,7 +230,7 @@ active_region_exists
 - 被移动的 `iso`，作为嵌套区域；
 - 编译器可证明不会造成逃逸的临时 `mut` 构造值。
 
-### 6.4 new imm
+### 7.4 new imm
 
 ```text
 Γ ⊢ new imm T(args) : imm T
@@ -236,25 +238,30 @@ active_region_exists
 
 语义等价于创建闭合区域后冻结，但实现可直接分配到冻结堆。
 
-## 7. enter 静态规则
+## 8. enter 静态规则
+
+`enter source as binding { body }` 打开 `source` 指向的闭合区域。`binding` 是当前桥对象在块内的可变视图，不是特殊关键字。
 
 若：
 
 ```text
 Γ ⊢ source : iso T ⊣ Γ1
 suspend(Γ1) = Γpaused
-Γpaused, binding: mut T ⊢ body : τ ⊣ Γbody
+Γpaused, binding: BridgeSlot[mut T] ⊢ body : τ ⊣ Γbody
 return_safe(τ)
 no_escape(binding_region, Γbody)
+resolve_bridge(binding, Γbody) = new_bridge : mut U
 ```
 
 则：
 
 ```text
-Γ ⊢ enter source as binding { body } : τ ⊣ restore(Γ1, Γbody)
+Γ ⊢ enter source as binding { body } : τ ⊣ restore_with_bridge(Γ1, Γbody, source, iso U)
 ```
 
-### 7.1 suspend
+`BridgeSlot[mut T]` 表示 `binding` 既可作为 `mut T` 使用，也可作为当前 active 区域的桥槽被强更新。若块内未给 `binding` 赋新值，`resolve_bridge` 返回进入时的桥对象。
+
+### 8.1 suspend
 
 进入内层区域时，外层环境中：
 
@@ -265,7 +272,7 @@ no_escape(binding_region, Γbody)
 - `imm T` 保持 `imm T`；
 - `cown T` 保持 `cown T`。
 
-### 7.2 返回限制
+### 8.2 返回限制
 
 `enter` 块不能返回指向其 active 区域内部的 `mut`、`tmp`、`pau` 引用。
 
@@ -285,11 +292,48 @@ let leaked = enter tree as t {
 }
 ```
 
-### 7.3 动态打开检查
+### 8.3 动态打开检查
 
 通过局部 `iso` 变量打开区域通常可静态证明未打开。通过字段或存储槽打开时，可能存在别名路径，需运行期检查目标区域是否已在当前区域栈中。
 
-## 8. explore 静态规则
+### 8.4 桥对象解析
+
+`enter` 退出时必须选择一个新的当前桥对象：
+
+```text
+resolve_bridge(binding, Γbody) = object_id
+```
+
+规则：
+
+- `object_id` 必须属于当前 active 区域；
+- `object_id` 的值能力必须可闭合为 `iso U`，不能是 `tmp U` 或指向外层 paused 区域的 `pau U`；
+- 若 `binding` 没有被赋值，`object_id` 为进入时的 `bridge_id`；
+- 若 `binding = e`，则 `e` 的结果对象成为新的 `bridge_id`；
+- 若新桥对象类型 `U` 不同于旧类型 `T`，则 `source` 必须是可强更新位置，使外层环境从 `iso T` 更新为 `iso U`；
+- 若 `source` 是不可写的 `let` 名称或临时值，则只允许解析为与原类型兼容的桥对象。
+
+示例：
+
+```gura
+var list: iso List = make_list()
+enter list as bridge {
+    let cursor: mut Cursor = new mut Cursor(current: bridge)
+    bridge = cursor
+}
+// list: iso Cursor
+```
+
+非法：
+
+```gura
+enter list as bridge {
+    let cursor: tmp Cursor = new tmp Cursor(current: bridge)
+    bridge = cursor    // tmp 不能成为闭合区域桥对象
+}
+```
+
+## 9. explore 静态规则
 
 `explore source as binding { body }` 要求 `source: iso T`，块内 `binding: pau T`。动态上，目标区域被打开后立即作为 paused 视图暴露，`body` 在词法受限的临时 active 上下文中执行。
 
@@ -302,7 +346,7 @@ let leaked = enter tree as t {
 - 返回值必须 `return_safe`；
 - 被探索区域的不变式在整个块内视为稳定。
 
-## 9. freeze 规则
+## 10. freeze 规则
 
 ```text
 Γ ⊢ e : iso T ⊣ Γ'
@@ -311,7 +355,7 @@ let leaked = enter tree as t {
 
 动态要求：区域闭合。若静态上 `e` 是当前可用 `iso`，闭合通常已保证；若来自 cown 或 FFI，需要运行期闭合检查。
 
-## 10. merge 规则
+## 11. merge 规则
 
 ```text
 Γ ⊢ e : iso T ⊣ Γ'
@@ -321,9 +365,9 @@ active_region_exists
 
 效果：源区域并入 active 区域。源区域的直接嵌套区域仍保持闭合嵌套区域。
 
-## 11. cown 规则
+## 12. cown 规则
 
-### 11.1 创建
+### 12.1 创建
 
 ```text
 Γ ⊢ e : iso T ⊣ Γ'
@@ -337,7 +381,7 @@ active_region_exists
 Γ ⊢ cown(e) : cown T ⊣ Γ'
 ```
 
-### 11.2 获取
+### 12.2 获取
 
 若：
 
@@ -357,7 +401,7 @@ no_escape(binding_region, Γbody)
 
 释放时运行期检查 cown 内部区域闭合。
 
-## 12. spawn 规则
+## 13. spawn 规则
 
 ```text
 Γ ⊢ arg_i : τ_i ⊣ Γ_i
@@ -367,11 +411,11 @@ no_escape(binding_region, Γbody)
 
 `iso` 参数必须通过 `move` 传递。`imm` 与 `cown` 参数可共享。
 
-## 13. 动态语义概要
+## 14. 动态语义概要
 
 动态语义由命令语言产生效果，区域语言消费效果。
 
-### 13.1 效果集合
+### 14.1 效果集合
 
 ```text
 Eff ::= load(dest, place)
@@ -390,7 +434,7 @@ Eff ::= load(dest, place)
       | spawn(fn, args)
 ```
 
-### 13.2 load
+### 14.2 load
 
 `load(dest, x.f)`：
 
@@ -399,7 +443,7 @@ Eff ::= load(dest, place)
 3. 根据 receiver capability 做视点适配；
 4. 绑定到 `dest`。
 
-### 13.3 swap
+### 14.3 swap
 
 `swap(dest_old, place, value)`：
 
@@ -409,29 +453,31 @@ Eff ::= load(dest, place)
 4. 更新区域拓扑元数据；
 5. 若违反拓扑不变式，触发确定性错误。
 
-### 13.4 enter
+### 14.4 enter
 
 `enter(region_ref, binding)`：
 
-1. 检查 region_ref 指向 closed 区域桥对象；
+1. 检查 region_ref 指向 closed 区域的当前桥对象；
 2. 若区域已 open，失败；
 3. 将区域从 `H_closed` 移到 `H_open`；
 4. 压入 RegionFrame；
-5. `binding` 绑定为 `mut bridge`；
+5. `binding` 绑定为当前桥对象的 `BridgeSlot[mut T]`；
 6. 外层 frame 变为 paused。
 
-### 13.5 exit
+### 14.5 exit
 
 `exit(region_id, new_bridge, result)`：
 
 1. 检查 region_id 是栈顶 active 区域；
 2. 检查无非法逃逸引用；
-3. 设置新桥对象；
-4. 弹出 RegionFrame；
-5. 把区域移回 `H_closed`；
-6. 外层 paused 区域恢复 active。
+3. 检查 `new_bridge` 属于 region_id 且不是临时对象；
+4. 设置 `bridge_id = new_bridge`；
+5. 弹出 RegionFrame；
+6. 把区域移回 `H_closed`；
+7. 外层 paused 区域恢复 active；
+8. 若桥类型改变，更新打开源对应的外层存储槽类型。
 
-### 13.6 freeze
+### 14.6 freeze
 
 `freeze(dest, iso_ref)`：
 
@@ -440,7 +486,7 @@ Eff ::= load(dest, place)
 3. 所有对象移动到 `H_frozen`；
 4. 结果以 `imm` 绑定到 dest。
 
-### 13.7 merge
+### 14.7 merge
 
 `merge(dest, iso_ref)`：
 
@@ -449,7 +495,7 @@ Eff ::= load(dest, place)
 3. 删除源区域边界；
 4. 结果以 `mut` 绑定到 dest。
 
-## 14. 区域写屏障
+## 15. 区域写屏障
 
 即使静态类型系统能证明大多数写入安全，运行时仍定义写屏障作为实现规范和 unsafe/FFI 兜底。
 
@@ -462,7 +508,7 @@ Eff ::= load(dest, place)
 5. 若 `tgt` 是 closed 区域桥对象，要求外部唯一并更新区域父子关系；
 6. 其他跨区域可变引用拒绝。
 
-## 15. 闭合判定
+## 16. 闭合判定
 
 区域 closed 当且仅当：
 
@@ -473,7 +519,7 @@ Eff ::= load(dest, place)
 
 实现可用静态生命周期证明、局部借用计数或调试遍历验证闭合性。
 
-## 16. 数据竞争自由性质
+## 17. 数据竞争自由性质
 
 定义直接访问为读取或写入对象字段，且不经过 cown acquire 协议。
 
@@ -490,27 +536,27 @@ Eff ::= load(dest, place)
 7. 线程边界只允许移动 `iso`、共享 `imm` 或共享 `cown`；
 8. 因此可变对象不会被两个线程同时直接访问。
 
-## 17. 内存安全性质
+## 18. 内存安全性质
 
-### 17.1 无悬垂引用
+### 18.1 无悬垂引用
 
 - `tmp` 和 `paused` 引用受词法区域栈限制；
 - 区域释放要求外部唯一桥引用被丢弃；
 - 释放整个区域时不存在外部非桥引用。
 
-### 17.2 无重复释放
+### 18.2 无重复释放
 
 - `iso` 不可复制；
 - 区域释放由唯一桥引用或 cown 所有权触发；
 - 移动后源位置 undef。
 
-### 17.3 无释放后使用
+### 18.3 无释放后使用
 
 - 释放区域会消耗唯一 `iso`；
 - 所有内部 `mut/tmp/paused` 引用不能逃逸到释放点之后；
 - cown 释放前执行闭合检查。
 
-## 18. FFI 规范
+## 19. FFI 规范
 
 FFI 函数默认视为 unsafe。可通过契约声明能力行为：
 
@@ -527,7 +573,7 @@ FFI 不得：
 - 在未 acquire cown 时访问其内部；
 - 修改 frozen 对象的程序可见状态。
 
-## 19. 编译器诊断要求
+## 20. 编译器诊断要求
 
 错误消息应解释违反的是哪个模型规则：
 
@@ -547,7 +593,7 @@ error[E0304]: cannot return `mut Node` from `enter` block
   help: return an `iso` by moving a closed subregion, or return an `imm` value using `freeze`
 ```
 
-## 20. 未决设计点
+## 21. 未决设计点
 
 1. 是否在首个版本支持 `explore read cown` 多读者模式。
 2. `new imm` 是独立分配还是强制脱糖为 `freeze(new iso ...)`。

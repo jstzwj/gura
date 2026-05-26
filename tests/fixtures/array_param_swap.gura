@@ -1,0 +1,11 @@
+fn swap(a: mut [i64], i: i64, j: i64): unit {
+  let saved: i64 = a[i]
+  a[i] = a[j]
+  a[j] = saved
+}
+
+fn main(): i64 {
+  let a: mut [i64] = [10, 20]
+  swap(a, 0, 1)
+  return a[0] - 20
+}

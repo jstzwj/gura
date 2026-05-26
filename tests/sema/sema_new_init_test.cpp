@@ -99,3 +99,34 @@ fn main(): i64 {
 )gura", &diagnostics));
   CHECK(diagnostics.find("initializer type 'bool' does not match field type 'i64'") != std::string::npos);
 }
+
+TEST_CASE("sema accepts iso allocation strategies") {
+  CHECK(checkSource(R"gura(
+struct Box {
+  let value: i64
+}
+
+fn main(): i64 {
+  let arena: iso Box = new iso<Arena> Box { value: 1 }
+  let rc: iso Box = new iso<RC> Box { value: 2 }
+  let gc: iso Box = new iso<GC> Box { value: 3 }
+  let manual: iso Box = new iso<Manual> Box { value: 4 }
+  return 0
+}
+)gura"));
+}
+
+TEST_CASE("sema rejects unknown iso allocation strategy") {
+  std::string diagnostics;
+  CHECK_FALSE(checkSource(R"gura(
+struct Box {
+  let value: i64
+}
+
+fn main(): i64 {
+  let b: iso Box = new iso<Foo> Box { value: 1 }
+  return 0
+}
+)gura", &diagnostics));
+  CHECK(diagnostics.find("unknown region allocation strategy 'Foo'") != std::string::npos);
+}

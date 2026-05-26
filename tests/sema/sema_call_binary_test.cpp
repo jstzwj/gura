@@ -56,6 +56,26 @@ fn main(): i64 { return true }
   CHECK(diagnostics.find("return type 'bool'") != std::string::npos);
 }
 
+TEST_CASE("sema accepts puts with string literals") {
+  CHECK(checkSource(R"gura(
+fn main(): i64 {
+  puts("hello")
+  return 0
+}
+)gura"));
+}
+
+TEST_CASE("sema rejects puts with non-string arguments") {
+  std::string diagnostics;
+  CHECK_FALSE(checkSource(R"gura(
+fn main(): i64 {
+  puts(1)
+  return 0
+}
+)gura", &diagnostics));
+  CHECK(diagnostics.find("argument 1 type 'i64' does not match expected type 'cstring'") != std::string::npos);
+}
+
 TEST_CASE("sema accepts i64 arithmetic and comparisons") {
   CHECK(checkSource(R"gura(
 fn main(): bool { return 1 + 2 * 3 == 7 }

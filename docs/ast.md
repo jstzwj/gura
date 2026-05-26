@@ -438,7 +438,7 @@ NewExpr {
 }
 
 AllocationKind = Mut | Tmp | Iso | Imm
-MemoryStrategy = Arena | RC | GC | Custom(TypePath)
+MemoryStrategy = Arena | RC | GC | Manual | Custom(TypePath)
 ```
 
 降低规则：

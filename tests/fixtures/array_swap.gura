@@ -1,0 +1,7 @@
+fn main(): i64 {
+  let a: mut [i64] = [10, 20]
+  let saved: i64 = a[0]
+  a[0] = a[1]
+  a[1] = saved
+  return a[1] - 10
+}

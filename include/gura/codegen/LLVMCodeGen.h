@@ -8,6 +8,7 @@ namespace gura {
 
 class LLVMCodeGen {
 public:
+  [[nodiscard]] static bool isAvailable();
   [[nodiscard]] std::string emitModule(const ast::SourceFile& file) const;
 };
 

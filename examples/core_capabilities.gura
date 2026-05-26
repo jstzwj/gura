@@ -1,11 +1,15 @@
+struct Box {
+    var value: i64
+}
+
 fn main(): i64 {
-    let x: iso Box = new iso Box
+    let x: iso Box = new iso Box { value: 1 }
     let frozen = freeze(move x)
-    let y: iso Box = new iso Box
-    let merged = merge(move y)
-    let r: iso Box = new iso Box
-    enter r as b {
-        return 1
+    let parent: iso Box = new iso Box { value: 2 }
+    let child: iso Box = new iso Box { value: 3 }
+    enter parent as bridge {
+        let merged = merge(move child)
+        bridge.value = 4
     }
     return 0
 }

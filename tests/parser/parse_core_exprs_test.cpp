@@ -19,6 +19,15 @@ void requireParses(std::string_view source) {
   REQUIRE(file->declarations.size() == 1);
 }
 
+std::string parseDiagnostics(std::string_view source) {
+  Lexer lexer(source);
+  const auto tokens = lexer.lexAll();
+  DiagnosticEngine diagnostics;
+  Parser parser(tokens, diagnostics);
+  parser.parseSourceFile();
+  return diagnostics.format();
+}
+
 } // namespace
 
 TEST_CASE("parser parses binding and move expressions") {
@@ -47,9 +56,50 @@ TEST_CASE("parser parses enter and explore expressions") {
   requireParses(R"gura(
 fn main(): i64 {
   let r: iso Box = new iso Box
-  enter r as b { return 1 }
-  explore r as b { return 1 }
+  enter r as bridge { return 1 }
+  explore r as view { return 1 }
   return 0
 }
 )gura");
+}
+
+TEST_CASE("parser treats bridge as an identifier") {
+  requireParses(R"gura(
+fn main(): i64 {
+  let bridge: i64 = 1
+  return bridge
+}
+)gura");
+}
+
+TEST_CASE("parser parses iso allocation strategies") {
+  requireParses(R"gura(
+fn main(): i64 {
+  let r: iso Box = new iso<Arena> Box { value: 1 }
+  return 0
+}
+)gura");
+}
+
+TEST_CASE("parser rejects region strategy without iso") {
+  const std::string diagnostics = parseDiagnostics(R"gura(
+fn main(): i64 {
+  let r: mut Box = new mut<Arena> Box { value: 1 }
+  return 0
+}
+)gura");
+
+  CHECK(diagnostics.find("region allocation strategy requires 'iso'") != std::string::npos);
+}
+
+TEST_CASE("parser rejects region expressions without binding") {
+  const std::string diagnostics = parseDiagnostics(R"gura(
+fn main(): i64 {
+  let r: iso Box = new iso Box
+  enter r { return 1 }
+  return 0
+}
+)gura");
+
+  CHECK(diagnostics.find("expected 'as' before region binding name") != std::string::npos);
 }

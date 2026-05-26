@@ -14,6 +14,10 @@ extern "C" void* __gura_region_merge(Region* target, Region* source) {
   target->allocations.insert(target->allocations.end(), source->allocations.begin(), source->allocations.end());
   source->allocations.clear();
   void* bridge = source->bridge;
+  if (auto* header = __gura_header_for_payload(bridge)) {
+    header->regionId = target->id;
+  }
+  target->bridgeToken.state = BridgeState::Merged;
   delete source;
   return bridge;
 }

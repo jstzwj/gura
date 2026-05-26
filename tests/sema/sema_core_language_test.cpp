@@ -34,11 +34,15 @@ fn main(): imm Box {
 )gura"));
 }
 
-TEST_CASE("sema accepts iso move into merge") {
+TEST_CASE("sema accepts iso move into merge inside active region") {
   CHECK(checkSource(R"gura(
 fn main(): i64 {
-  let x: iso Box = new iso Box
-  let y = merge(move x)
+  let parent: iso Box = new iso Box
+  let child: iso Box = new iso Box
+  enter parent as bridge {
+    let y = merge(move child)
+    return 0
+  }
   return 0
 }
 )gura"));
@@ -80,12 +84,46 @@ fn main(): i64 {
   CHECK(diagnostics.find("already moved") != std::string::npos);
 }
 
+TEST_CASE("sema rejects freeze and merge without move") {
+  std::string diagnostics;
+  CHECK_FALSE(checkSource(R"gura(
+fn main(): i64 {
+  let x: iso Box = new iso Box
+  let y = freeze(x)
+  return 0
+}
+)gura", &diagnostics));
+  CHECK(diagnostics.find("freeze requires move of an iso value") != std::string::npos);
+
+  diagnostics.clear();
+  CHECK_FALSE(checkSource(R"gura(
+fn main(): i64 {
+  let x: iso Box = new iso Box
+  let y = merge(x)
+  return 0
+}
+)gura", &diagnostics));
+  CHECK(diagnostics.find("merge requires move of an iso value") != std::string::npos);
+}
+
+TEST_CASE("sema rejects merge outside active region") {
+  std::string diagnostics;
+  CHECK_FALSE(checkSource(R"gura(
+fn main(): i64 {
+  let x: iso Box = new iso Box
+  let y = merge(move x)
+  return 0
+}
+)gura", &diagnostics));
+  CHECK(diagnostics.find("merge requires an active region") != std::string::npos);
+}
+
 TEST_CASE("sema rejects freeze and merge on non-iso") {
   std::string diagnostics;
   CHECK_FALSE(checkSource(R"gura(
 fn main(): i64 {
   let x: mut Box = new mut Box
-  let y = freeze(x)
+  let y = freeze(move x)
   return 0
 }
 )gura", &diagnostics));
@@ -94,8 +132,12 @@ fn main(): i64 {
   diagnostics.clear();
   CHECK_FALSE(checkSource(R"gura(
 fn main(): i64 {
+  let outer: iso Box = new iso Box
   let x: imm Box = new imm Box
-  let y = merge(x)
+  enter outer as bridge {
+    let y = merge(move x)
+    return 0
+  }
   return 0
 }
 )gura", &diagnostics));
@@ -111,7 +153,7 @@ fn main(): i64 {
   return 0
 }
 )gura", &diagnostics));
-  CHECK(diagnostics.find("requires an iso") != std::string::npos);
+  CHECK(diagnostics.find("enter/explore source must be an iso binding") != std::string::npos);
 
   diagnostics.clear();
   CHECK_FALSE(checkSource(R"gura(

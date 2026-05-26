@@ -1,0 +1,4 @@
+fn main(): i64 {
+  puts("hello")
+  return 0
+}

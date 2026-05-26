@@ -20,6 +20,8 @@ struct TypeRef : Node {
   Capability capability = Capability::None;
   std::string name;
   bool optional = false;
+  bool isArray = false;
+  Ptr<TypeRef> elementType;
 };
 
 } // namespace gura::ast
