@@ -54,7 +54,7 @@ trait Named {
   fn name(self: imm): i64
 }
 
-fn get_name[T: Named](value: imm T): i64 {
+fn get_name<T: Named>(value: imm T): i64 {
   return value.name()
 }
 )gura");
@@ -70,7 +70,7 @@ trait Tagged {
   fn tag(self: imm): i64
 }
 
-fn describe[T: Named + Tagged](value: imm T): i64 {
+fn describe<T: Named + Tagged>(value: imm T): i64 {
   return value.name() + value.tag()
 }
 )gura");
@@ -86,7 +86,7 @@ trait Tagged {
   fn tag(self: imm): i64
 }
 
-fn combine[T: Named, U: Tagged](x: imm T, y: imm U): i64 {
+fn combine<T: Named, U: Tagged>(x: imm T, y: imm U): i64 {
   return x.name() + y.tag()
 }
 )gura");

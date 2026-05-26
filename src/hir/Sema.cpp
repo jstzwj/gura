@@ -78,6 +78,26 @@ bool isRegionStrategy(std::string_view strategy) {
   return strategy == "Arena" || strategy == "RC" || strategy == "GC" || strategy == "Manual";
 }
 
+bool isCoreBuiltinName(std::string_view name) {
+  return name == "print" || name == "println" || name == "print_i64" || name == "println_i64" || name == "readln_i64";
+}
+
+std::optional<std::string> qualifiedCoreBuiltinName(const ast::Expr& expr) {
+  const auto* leaf = dynamic_cast<const ast::FieldAccessExpr*>(&expr);
+  if (leaf == nullptr || !isCoreBuiltinName(leaf->fieldName)) {
+    return std::nullopt;
+  }
+  const auto* core = dynamic_cast<const ast::FieldAccessExpr*>(leaf->object.get());
+  if (core == nullptr || core->fieldName != "core") {
+    return std::nullopt;
+  }
+  const auto* stdName = dynamic_cast<const ast::NameExpr*>(core->object.get());
+  if (stdName == nullptr || stdName->name != "std") {
+    return std::nullopt;
+  }
+  return leaf->fieldName;
+}
+
 bool sameNominalType(const Type& lhs, const Type& rhs) {
   if (lhs.name == "<invalid>" || rhs.name == "<invalid>") {
     return true;
@@ -99,6 +119,37 @@ bool containsString(const std::vector<std::string>& values, const std::string& v
   return std::find(values.begin(), values.end(), value) != values.end();
 }
 
+std::string joinPath(const std::vector<std::string>& segments) {
+  std::string result;
+  for (std::size_t i = 0; i < segments.size(); ++i) {
+    if (i != 0) {
+      result += ".";
+    }
+    result += segments[i];
+  }
+  return result;
+}
+
+std::string qualifiedName(const ast::Path& modulePath, std::string_view name) {
+  std::vector<std::string> segments = modulePath.segments;
+  segments.emplace_back(name);
+  return joinPath(segments);
+}
+
+ast::Path pathFromFieldAccess(const ast::Expr& expr) {
+  if (const auto* name = dynamic_cast<const ast::NameExpr*>(&expr)) {
+    return ast::Path{{name->name}};
+  }
+  if (const auto* field = dynamic_cast<const ast::FieldAccessExpr*>(&expr)) {
+    ast::Path path = pathFromFieldAccess(*field->object);
+    if (!path.segments.empty()) {
+      path.segments.push_back(field->fieldName);
+    }
+    return path;
+  }
+  return {};
+}
+
 const ast::NameExpr* asNameExpr(const ast::Expr* expr) {
   return dynamic_cast<const ast::NameExpr*>(expr);
 }
@@ -106,6 +157,7 @@ const ast::NameExpr* asNameExpr(const ast::Expr* expr) {
 } // namespace
 
 bool Sema::check(const ast::SourceFile& file) {
+  collectModules(file);
   collectStructs(file);
   collectTraits(file);
   collectImplMethods(file);
@@ -117,7 +169,9 @@ bool Sema::check(const ast::SourceFile& file) {
       ok = false;
       continue;
     }
+    currentDecl_ = decl.get();
     ok = checkDecl(*decl) && ok;
+    currentDecl_ = nullptr;
   }
   return ok && !diagnostics_.hasError();
 }
@@ -149,6 +203,19 @@ Sema::BindingState* Sema::lookup(const std::string& name) {
     }
   }
   return nullptr;
+}
+
+void Sema::collectModules(const ast::SourceFile& file) {
+  modules_.clear();
+  for (const auto& decl : file.declarations) {
+    if (decl == nullptr || decl->modulePath.segments.empty()) {
+      continue;
+    }
+    const std::string moduleName = joinPath(decl->modulePath.segments);
+    auto& module = modules_[moduleName];
+    module.path = decl->modulePath;
+    module.imports = decl->imports;
+  }
 }
 
 void Sema::collectStructs(const ast::SourceFile& file) {
@@ -332,10 +399,22 @@ void Sema::validateTraitImpls(const ast::SourceFile& file) {
 
 void Sema::collectFunctionSignatures(const ast::SourceFile& file) {
   functions_.clear();
-  FunctionSignature puts;
-  puts.returnType = numericType("i32");
-  puts.params.push_back(cstringType());
-  functions_.emplace("puts", std::move(puts));
+  qualifiedFunctionKeys_.clear();
+  simpleFunctionKeys_.clear();
+  auto addBuiltin = [this](std::string name, Type returnType, std::vector<Type> params) {
+    FunctionSignature signature;
+    signature.returnType = std::move(returnType);
+    signature.params = std::move(params);
+    functions_.emplace(name, std::move(signature));
+    simpleFunctionKeys_[name].push_back(name);
+    qualifiedFunctionKeys_[fmt::format("std.core.{}", name)] = name;
+  };
+  addBuiltin("puts", numericType("i32"), {cstringType()});
+  addBuiltin("print", unitType(), {cstringType()});
+  addBuiltin("println", unitType(), {cstringType()});
+  addBuiltin("print_i64", unitType(), {numericType("i64")});
+  addBuiltin("println_i64", unitType(), {numericType("i64")});
+  addBuiltin("readln_i64", numericType("i64"), {});
   for (const auto& decl : file.declarations) {
     const auto* fn = dynamic_cast<const ast::FnDecl*>(decl.get());
     if (fn == nullptr) {
@@ -355,11 +434,20 @@ void Sema::collectFunctionSignatures(const ast::SourceFile& file) {
       }
       signature.params.push_back(std::move(paramType));
     }
-    if (functions_.contains(fn->name)) {
+    const std::string key = fn->modulePath.segments.empty() ? fn->name : qualifiedName(fn->modulePath, fn->name);
+    if (functions_.contains(key)) {
+      report(fn->span, fmt::format("function '{}' is already defined", key));
+      continue;
+    }
+    if (fn->modulePath.segments.empty() && functions_.contains(fn->name)) {
       report(fn->span, fmt::format("function '{}' is already defined", fn->name));
       continue;
     }
-    functions_.emplace(fn->name, std::move(signature));
+    functions_.emplace(key, std::move(signature));
+    simpleFunctionKeys_[fn->name].push_back(key);
+    if (!fn->modulePath.segments.empty()) {
+      qualifiedFunctionKeys_[key] = key;
+    }
   }
 }
 
@@ -857,13 +945,75 @@ Type Sema::checkBinary(const ast::BinaryExpr& expr) {
   return invalidType();
 }
 
-Type Sema::checkCall(const ast::CallExpr& expr) {
-  const auto* callee = dynamic_cast<const ast::NameExpr*>(expr.callee.get());
-  if (callee == nullptr) {
-    if (const auto* method = dynamic_cast<const ast::FieldAccessExpr*>(expr.callee.get())) {
-      return checkMethodCall(expr, *method);
+std::optional<std::string> Sema::resolveFunctionName(const ast::Path& path, const ast::Decl* contextDecl, Span span) {
+  if (path.segments.empty()) {
+    return std::nullopt;
+  }
+  if (path.segments.size() == 1) {
+    const std::string& name = path.segments.front();
+    if (contextDecl != nullptr && !contextDecl->modulePath.segments.empty()) {
+      const std::string localKey = qualifiedName(contextDecl->modulePath, name);
+      if (functions_.contains(localKey)) {
+        return localKey;
+      }
+      std::vector<std::string> importedMatches;
+      for (const auto& import : contextDecl->imports) {
+        if (import.alias.has_value()) {
+          continue;
+        }
+        const std::string importedKey = qualifiedName(import.path, name);
+        if (functions_.contains(importedKey)) {
+          importedMatches.push_back(importedKey);
+        }
+      }
+      if (importedMatches.size() == 1) {
+        return importedMatches.front();
+      }
+      if (importedMatches.size() > 1) {
+        report(span, fmt::format("function '{}' is ambiguous between imports", name));
+        return std::nullopt;
+      }
     }
-    report(expr.span, "function call currently requires a function name");
+    auto simpleIt = simpleFunctionKeys_.find(name);
+    if (simpleIt == simpleFunctionKeys_.end() || simpleIt->second.empty()) {
+      return std::nullopt;
+    }
+    if (simpleIt->second.size() == 1) {
+      return simpleIt->second.front();
+    }
+    report(span, fmt::format("function '{}' is ambiguous; use a qualified name", name));
+    return std::nullopt;
+  }
+
+  if (contextDecl != nullptr) {
+    for (const auto& import : contextDecl->imports) {
+      if (!import.alias.has_value() || *import.alias != path.segments.front()) {
+        continue;
+      }
+      ast::Path resolved = import.path;
+      resolved.segments.insert(resolved.segments.end(), path.segments.begin() + 1, path.segments.end());
+      const std::string key = joinPath(resolved.segments);
+      if (functions_.contains(key)) {
+        return key;
+      }
+      return std::nullopt;
+    }
+  }
+
+  const std::string key = joinPath(path.segments);
+  if (functions_.contains(key)) {
+    return key;
+  }
+  auto qualifiedIt = qualifiedFunctionKeys_.find(key);
+  if (qualifiedIt != qualifiedFunctionKeys_.end()) {
+    return qualifiedIt->second;
+  }
+  return std::nullopt;
+}
+
+Type Sema::checkResolvedFunctionCall(const ast::CallExpr& expr, const FunctionSignature& signature, std::string_view diagnosticName, Span calleeSpan) {
+  if (!signature.genericParams.empty()) {
+    report(calleeSpan, fmt::format("calling generic function '{}' is not supported yet", diagnosticName));
     for (const auto& arg : expr.arguments) {
       if (arg != nullptr) {
         checkExpr(*arg);
@@ -871,35 +1021,16 @@ Type Sema::checkCall(const ast::CallExpr& expr) {
     }
     return invalidType();
   }
-  const auto signature = functions_.find(callee->name);
-  if (signature == functions_.end()) {
-    report(callee->span, fmt::format("undefined function '{}'", callee->name));
-    for (const auto& arg : expr.arguments) {
-      if (arg != nullptr) {
-        checkExpr(*arg);
-      }
-    }
-    return invalidType();
+  if (expr.arguments.size() != signature.params.size()) {
+    report(expr.span, fmt::format("function '{}' expects {} argument(s) but got {}", diagnosticName, signature.params.size(), expr.arguments.size()));
   }
-  if (!signature->second.genericParams.empty()) {
-    report(callee->span, fmt::format("calling generic function '{}' is not supported yet", callee->name));
-    for (const auto& arg : expr.arguments) {
-      if (arg != nullptr) {
-        checkExpr(*arg);
-      }
-    }
-    return invalidType();
-  }
-  if (expr.arguments.size() != signature->second.params.size()) {
-    report(expr.span, fmt::format("function '{}' expects {} argument(s) but got {}", callee->name, signature->second.params.size(), expr.arguments.size()));
-  }
-  const std::size_t checkedCount = std::min(expr.arguments.size(), signature->second.params.size());
+  const std::size_t checkedCount = std::min(expr.arguments.size(), signature.params.size());
   for (std::size_t i = 0; i < checkedCount; ++i) {
     if (expr.arguments[i] == nullptr) {
       continue;
     }
     Type actual = checkExpr(*expr.arguments[i]);
-    const Type& expected = signature->second.params[i];
+    const Type& expected = signature.params[i];
     if (!sameType(expected, actual)) {
       report(expr.arguments[i]->span, fmt::format("argument {} type '{}' does not match expected type '{}'", i + 1, typeName(actual), typeName(expected)));
     }
@@ -909,7 +1040,56 @@ Type Sema::checkCall(const ast::CallExpr& expr) {
       checkExpr(*expr.arguments[i]);
     }
   }
-  return signature->second.returnType;
+  return signature.returnType;
+}
+
+Type Sema::checkFunctionCall(const ast::CallExpr& expr, const std::string& functionName, Span calleeSpan) {
+  ast::Path path{{functionName}};
+  auto resolved = resolveFunctionName(path, currentDecl_, calleeSpan);
+  if (!resolved.has_value()) {
+    report(calleeSpan, fmt::format("undefined function '{}'", functionName));
+    for (const auto& arg : expr.arguments) {
+      if (arg != nullptr) {
+        checkExpr(*arg);
+      }
+    }
+    return invalidType();
+  }
+  const auto signature = functions_.find(*resolved);
+  if (signature == functions_.end()) {
+    return invalidType();
+  }
+  return checkResolvedFunctionCall(expr, signature->second, functionName, calleeSpan);
+}
+
+Type Sema::checkCall(const ast::CallExpr& expr) {
+  if (expr.callee != nullptr) {
+    if (auto builtinName = qualifiedCoreBuiltinName(*expr.callee)) {
+      return checkFunctionCall(expr, *builtinName, expr.callee->span);
+    }
+    ast::Path path = pathFromFieldAccess(*expr.callee);
+    if (path.segments.size() > 1) {
+      if (auto resolved = resolveFunctionName(path, currentDecl_, expr.callee->span)) {
+        const auto signature = functions_.find(*resolved);
+        if (signature != functions_.end()) {
+          return checkResolvedFunctionCall(expr, signature->second, joinPath(path.segments), expr.callee->span);
+        }
+      }
+    }
+  }
+  if (const auto* callee = dynamic_cast<const ast::NameExpr*>(expr.callee.get())) {
+    return checkFunctionCall(expr, callee->name, callee->span);
+  }
+  if (const auto* method = dynamic_cast<const ast::FieldAccessExpr*>(expr.callee.get())) {
+    return checkMethodCall(expr, *method);
+  }
+  report(expr.span, "function call currently requires a function name");
+  for (const auto& arg : expr.arguments) {
+    if (arg != nullptr) {
+      checkExpr(*arg);
+    }
+  }
+  return invalidType();
 }
 
 Type Sema::checkMethodCall(const ast::CallExpr& expr, const ast::FieldAccessExpr& callee) {
@@ -1153,6 +1333,9 @@ Type Sema::typeFromAst(const ast::TypeRef& type) {
       report(type.elementType ? type.elementType->span : type.span, "arrays currently support only i64 elements");
     }
     return arrayType(capabilityFromAst(type.capability), std::move(element));
+  }
+  if (type.path.size() > 1) {
+    return Type{capabilityFromAst(type.capability), joinPath(type.path)};
   }
   return Type{capabilityFromAst(type.capability), type.name};
 }

@@ -65,6 +65,56 @@ fn main(): i64 {
   CHECK(ir.find("hello") != std::string::npos);
 }
 
+TEST_CASE("codegen emits core string output builtins") {
+  const std::string ir = emitSource(R"gura(
+fn main(): i64 {
+  print("hello")
+  println("world")
+  return 0
+}
+)gura");
+
+  CHECK(ir.find("@printf") != std::string::npos);
+  CHECK(ir.find("hello") != std::string::npos);
+  CHECK(ir.find("world") != std::string::npos);
+}
+
+TEST_CASE("codegen emits qualified std core builtins") {
+  const std::string ir = emitSource(R"gura(
+fn main(): i64 {
+  std.core.print("hello")
+  std.core.println("world")
+  std.core.print_i64(1)
+  std.core.println_i64(2)
+  let value: i64 = std.core.readln_i64()
+  return value
+}
+)gura");
+
+  CHECK(ir.find("@printf") != std::string::npos);
+  CHECK(ir.find("@scanf") != std::string::npos);
+  CHECK(ir.find("hello") != std::string::npos);
+  CHECK(ir.find("world") != std::string::npos);
+  CHECK(ir.find("alloca i64") != std::string::npos);
+  CHECK(ir.find("load i64") != std::string::npos);
+}
+
+TEST_CASE("codegen emits core i64 I/O builtins") {
+  const std::string ir = emitSource(R"gura(
+fn main(): i64 {
+  print_i64(1)
+  println_i64(2)
+  let value: i64 = readln_i64()
+  return value
+}
+)gura");
+
+  CHECK(ir.find("@printf") != std::string::npos);
+  CHECK(ir.find("@scanf") != std::string::npos);
+  CHECK(ir.find("alloca i64") != std::string::npos);
+  CHECK(ir.find("load i64") != std::string::npos);
+}
+
 TEST_CASE("codegen emits comparisons and branches") {
   const std::string ir = emitSource(R"gura(
 fn abs(x: i64): i64 {

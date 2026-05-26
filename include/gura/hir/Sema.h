@@ -77,6 +77,11 @@ private:
     Span span;
   };
 
+  struct ModuleInfo {
+    ast::Path path;
+    std::vector<ast::ImportDecl> imports;
+  };
+
   using GenericEnv = std::unordered_map<std::string, GenericParamInfo>;
 
   void pushScope();
@@ -84,6 +89,7 @@ private:
   void declare(std::string name, BindingState state);
   BindingState* lookup(const std::string& name);
 
+  void collectModules(const ast::SourceFile& file);
   void collectStructs(const ast::SourceFile& file);
   void collectTraits(const ast::SourceFile& file);
   void collectImplMethods(const ast::SourceFile& file);
@@ -115,6 +121,9 @@ private:
   Type checkIndex(const ast::IndexExpr& expr);
   Type checkIndexAssign(const ast::IndexExpr& target, const Type& value, Span valueSpan);
   Type checkBinary(const ast::BinaryExpr& expr);
+  Type checkFunctionCall(const ast::CallExpr& expr, const std::string& functionName, Span calleeSpan);
+  Type checkResolvedFunctionCall(const ast::CallExpr& expr, const FunctionSignature& signature, std::string_view diagnosticName, Span calleeSpan);
+  std::optional<std::string> resolveFunctionName(const ast::Path& path, const ast::Decl* contextDecl, Span span);
   Type checkCall(const ast::CallExpr& expr);
   Type checkMethodCall(const ast::CallExpr& expr, const ast::FieldAccessExpr& callee);
   Type checkReturn(const ast::ReturnExpr& expr);
@@ -136,6 +145,10 @@ private:
   std::unordered_map<std::string, StructInfo> structs_;
   std::unordered_map<std::string, TraitInfo> traits_;
   std::unordered_map<std::string, FunctionSignature> functions_;
+  std::unordered_map<std::string, ModuleInfo> modules_;
+  std::unordered_map<std::string, std::string> qualifiedFunctionKeys_;
+  std::unordered_map<std::string, std::vector<std::string>> simpleFunctionKeys_;
+  const ast::Decl* currentDecl_ = nullptr;
   GenericEnv currentGenericParams_;
   Type currentReturnType_{Capability::None, "unit"};
   int regionDepth_ = 0;

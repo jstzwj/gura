@@ -1,0 +1,4 @@
+fn main(): i64 {
+  let box: imm Box = new imm Box { value: 42 }
+  return box.value - 42
+}

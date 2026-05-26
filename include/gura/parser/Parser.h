@@ -22,6 +22,9 @@ private:
   const Token& advance();
   void expect(TokenKind kind, std::string message);
 
+  ast::Path parsePath(std::string_view context);
+  void parseModuleHeader(ast::SourceFile& file);
+  void parseImport(ast::SourceFile& file);
   ast::Ptr<ast::Decl> parseDecl();
   ast::Ptr<ast::FnDecl> parseFnDecl(bool requireBody = true);
   ast::Ptr<ast::StructDecl> parseStructDecl();

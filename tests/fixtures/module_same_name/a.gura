@@ -1,0 +1,5 @@
+module a
+
+fn helper(): i64 {
+  return 20
+}

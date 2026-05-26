@@ -22,6 +22,17 @@ TEST_CASE("lexer recognizes pau capability") {
   CHECK(tokens[0].text == "pau");
 }
 
+TEST_CASE("lexer recognizes module and import keywords") {
+  Lexer lexer("module app.main import std.core as core");
+  const auto tokens = lexer.lexAll();
+  REQUIRE(tokens.size() >= 8);
+  CHECK(tokens[0].kind == TokenKind::KwModule);
+  CHECK(tokens[2].kind == TokenKind::Dot);
+  CHECK(tokens[4].kind == TokenKind::KwImport);
+  CHECK(tokens[6].kind == TokenKind::Dot);
+  CHECK(tokens[8].kind == TokenKind::KwAs);
+}
+
 TEST_CASE("lexer recognizes escaped identifiers") {
   Lexer lexer("let `type` = 1");
   const auto tokens = lexer.lexAll();

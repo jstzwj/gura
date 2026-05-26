@@ -1,5 +1,7 @@
 #include "gura/parser/Parser.h"
 
+#include <fmt/format.h>
+
 #include <string_view>
 #include <utility>
 
@@ -46,7 +48,23 @@ Parser::Parser(std::span<const Token> tokens, DiagnosticEngine& diagnostics) : t
 ast::Ptr<ast::SourceFile> Parser::parseSourceFile() {
   auto file = std::make_unique<ast::SourceFile>();
   file->id = nextNodeId();
+  if (at(TokenKind::KwModule)) {
+    parseModuleHeader(*file);
+  }
+  while (at(TokenKind::KwImport)) {
+    parseImport(*file);
+  }
   while (!at(TokenKind::EndOfFile)) {
+    if (at(TokenKind::KwModule)) {
+      diagnostics_.error(peek().span, "module declaration must appear before imports and declarations");
+      advance();
+      continue;
+    }
+    if (at(TokenKind::KwImport)) {
+      diagnostics_.error(peek().span, "import declaration must appear before declarations");
+      advance();
+      continue;
+    }
     if (auto decl = parseDecl()) {
       file->declarations.push_back(std::move(decl));
     } else {
@@ -90,6 +108,46 @@ void Parser::expect(TokenKind kind, std::string message) {
   }
 }
 
+ast::Path Parser::parsePath(std::string_view context) {
+  ast::Path path;
+  if (!at(TokenKind::Identifier)) {
+    diagnostics_.error(peek().span, fmt::format("expected {} path", context));
+    return path;
+  }
+  path.segments.push_back(advance().text);
+  while (consume(TokenKind::Dot)) {
+    if (!at(TokenKind::Identifier)) {
+      diagnostics_.error(peek().span, fmt::format("expected identifier in {} path", context));
+      break;
+    }
+    path.segments.push_back(advance().text);
+  }
+  return path;
+}
+
+void Parser::parseModuleHeader(ast::SourceFile& file) {
+  const auto begin = advance().span.begin;
+  file.explicitModule = parsePath("module");
+  file.resolvedModule = *file.explicitModule;
+  file.span.begin = begin;
+  file.span.end = peek().span.begin;
+}
+
+void Parser::parseImport(ast::SourceFile& file) {
+  const auto begin = advance().span.begin;
+  ast::ImportDecl import;
+  import.path = parsePath("import");
+  if (consume(TokenKind::KwAs)) {
+    if (!at(TokenKind::Identifier)) {
+      diagnostics_.error(peek().span, "expected import alias after 'as'");
+    } else {
+      import.alias = advance().text;
+    }
+  }
+  import.span = Span{begin, peek().span.begin};
+  file.imports.push_back(std::move(import));
+}
+
 ast::Ptr<ast::Decl> Parser::parseDecl() {
   if (at(TokenKind::KwFn)) {
     return parseFnDecl();
@@ -116,7 +174,7 @@ ast::Ptr<ast::FnDecl> Parser::parseFnDecl(bool requireBody) {
     return fn;
   }
   fn->name = advance().text;
-  if (at(TokenKind::LBracket)) {
+  if (at(TokenKind::Less)) {
     fn->genericParams = parseGenericParams();
   }
   expect(TokenKind::LParen, "expected '(' after function name");
@@ -146,13 +204,13 @@ ast::Ptr<ast::FnDecl> Parser::parseFnDecl(bool requireBody) {
 
 std::vector<ast::GenericParam> Parser::parseGenericParams() {
   std::vector<ast::GenericParam> params;
-  expect(TokenKind::LBracket, "expected '[' before generic parameter list");
-  if (!at(TokenKind::RBracket)) {
+  expect(TokenKind::Less, "expected '<' before generic parameter list");
+  if (!at(TokenKind::Greater)) {
     do {
       params.push_back(parseGenericParam());
     } while (consume(TokenKind::Comma));
   }
-  expect(TokenKind::RBracket, "expected ']' after generic parameter list");
+  expect(TokenKind::Greater, "expected '>' after generic parameter list");
   return params;
 }
 
@@ -314,7 +372,11 @@ ast::Ptr<ast::TypeRef> Parser::parseTypeRef() {
     diagnostics_.error(peek().span, "expected type name");
     return type;
   }
-  type->name = advance().text;
+  const ast::Path path = parsePath("type");
+  type->path = path.segments;
+  if (!type->path.empty()) {
+    type->name = type->path.back();
+  }
   type->optional = consume(TokenKind::Question);
   type->span.end = peek().span.begin;
   return type;

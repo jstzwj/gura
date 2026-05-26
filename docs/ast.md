@@ -197,7 +197,7 @@ PathType {
 }
 ```
 
-示例：`List[imm String]`。
+示例：`List<imm String>`。
 
 ### 4.2 能力类型
 
@@ -222,7 +222,7 @@ OptionalType {
 }
 ```
 
-`T?` 降低为 `Option[T]` 或 nullable niche representation。
+`T?` 降低为 `Option<T>` 或 nullable niche representation。
 
 ### 4.4 联合类型
 

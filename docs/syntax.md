@@ -1,6 +1,6 @@
 # gura 语法设计
 
-本文档描述 gura 的表层语法。语法偏向 Rust / Swift / Kotlin-like：块使用 `{}`，声明使用 `fn`、`struct`、`enum`、`trait`，变量使用 `let`/`var`，泛型使用 `[]`，类型标注使用 `:`。
+本文档描述 gura 的表层语法。语法偏向 Rust / Swift / Kotlin-like：块使用 `{}`，声明使用 `fn`、`struct`、`enum`、`trait`，变量使用 `let`/`var`，泛型使用 `<>`，数组和索引使用 `[]`，类型标注使用 `:`。
 
 ## 1. 词法
 
@@ -95,8 +95,9 @@ Type ::= Capability? TypeAtom
        | FnType
 
 Capability ::= "mut" | "tmp" | "iso" | "imm" | "pau" | "cown"
-TypeAtom ::= Identifier TypeArgs? | "(" TypeList? ")"
-TypeArgs ::= "[" Type ("," Type)* "]"
+TypeAtom ::= Identifier TypeArgs? | ArrayType | "(" TypeList? ")"
+TypeArgs ::= "<" Type ("," Type)* ">"
+ArrayType ::= "[" Type "]"
 FnType ::= "fn" "(" ParamTypes? ")" "->" Type
 ```
 
@@ -104,10 +105,10 @@ FnType ::= "fn" "(" ParamTypes? ")" "->" Type
 
 ```gura
 mut Node
-iso Tree[String]
-imm List[imm String]
+iso Tree<String>
+imm List<imm String>
 cown Account
-fn(mut Buffer, imm Bytes) -> Result[unit, Error]
+fn(mut Buffer, imm Bytes) -> Result<unit, Error>
 ```
 
 ## 6. 函数
@@ -161,16 +162,16 @@ struct Counter {
 ## 7. 结构体
 
 ```gura
-struct Node[T] {
+struct Node<T> {
     var value: T
-    var next: mut Node[T]?
+    var next: mut Node<T>?
 }
 ```
 
 字段默认为不可重新赋值字段；使用 `var` 表示字段可更新。
 
 ```gura
-struct Pair[A, B] {
+struct Pair<A, B> {
     let first: A
     let second: B
 }
@@ -189,12 +190,12 @@ struct Tree {
 ## 8. 枚举与模式匹配
 
 ```gura
-enum Option[T] {
+enum Option<T> {
     Some(T)
     none
 }
 
-fn unwrap_or(opt: Option[i64], fallback: i64): i64 {
+fn unwrap_or(opt: Option<i64>, fallback: i64): i64 {
     match opt {
         case Some(x) => x
         case none => fallback
@@ -276,7 +277,7 @@ let x = {
 ### 11.1 active 区域内分配
 
 ```gura
-let node: mut Node[i64] = new mut Node(value: 1, next: none)
+let node: mut Node<i64> = new mut Node(value: 1, next: none)
 ```
 
 `new mut T(...)` 在当前 active 区域分配对象，返回 `mut T`。
@@ -400,7 +401,7 @@ enter list as bridge {
 
 ```gura
 explore map as m {
-    let slot: pau Store[iso Value] = m.get(key)
+    let slot: pau Store<iso Value> = m.get(key)
     enter *slot as value {
         value.touch()
     }
@@ -496,9 +497,9 @@ spawn worker(move job, config, result)
 ## 15. 错误处理
 
 ```gura
-enum Result[T, E] { Ok(T), Err(E) }
+enum Result<T, E> { Ok(T), Err(E) }
 
-fn read_file(path: imm String): Result[imm Bytes, IOError] {
+fn read_file(path: imm String): Result<imm Bytes, IOError> {
     ...
 }
 ```
@@ -524,7 +525,7 @@ struct LogEntry {
 
 struct Account {
     var balance: i64
-    var logs: mut List[imm LogEntry]
+    var logs: mut List<imm LogEntry>
 
     fn deposit(self: mut, amount: i64) {
         self.balance += amount

@@ -17,6 +17,8 @@
 #include <charconv>
 #include <cstdlib>
 #include <cstdint>
+#include <algorithm>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -26,6 +28,71 @@ namespace gura {
 
 #if GURA_HAS_LLVM
 namespace {
+
+bool isCoreBuiltinName(std::string_view name) {
+  return name == "print" || name == "println" || name == "print_i64" || name == "println_i64" || name == "readln_i64";
+}
+
+std::string joinPath(const std::vector<std::string>& segments) {
+  std::string result;
+  for (std::size_t i = 0; i < segments.size(); ++i) {
+    if (i != 0) {
+      result += ".";
+    }
+    result += segments[i];
+  }
+  return result;
+}
+
+std::string qualifiedName(const ast::Path& modulePath, std::string_view name) {
+  std::vector<std::string> segments = modulePath.segments;
+  segments.emplace_back(name);
+  return joinPath(segments);
+}
+
+std::string manglePath(std::string_view key) {
+  if (key == "main" || key.find('.') == std::string_view::npos) {
+    return std::string(key);
+  }
+  if (key.ends_with(".main")) {
+    return "main";
+  }
+  std::string result = "gura_";
+  for (const char ch : key) {
+    result += ch == '.' ? '_' : ch;
+  }
+  return result;
+}
+
+ast::Path pathFromFieldAccess(const ast::Expr& expr) {
+  if (const auto* name = dynamic_cast<const ast::NameExpr*>(&expr)) {
+    return ast::Path{{name->name}};
+  }
+  if (const auto* field = dynamic_cast<const ast::FieldAccessExpr*>(&expr)) {
+    ast::Path path = pathFromFieldAccess(*field->object);
+    if (!path.segments.empty()) {
+      path.segments.push_back(field->fieldName);
+    }
+    return path;
+  }
+  return {};
+}
+
+std::optional<std::string> qualifiedCoreBuiltinName(const ast::Expr& expr) {
+  const auto* leaf = dynamic_cast<const ast::FieldAccessExpr*>(&expr);
+  if (leaf == nullptr || !isCoreBuiltinName(leaf->fieldName)) {
+    return std::nullopt;
+  }
+  const auto* core = dynamic_cast<const ast::FieldAccessExpr*>(leaf->object.get());
+  if (core == nullptr || core->fieldName != "core") {
+    return std::nullopt;
+  }
+  const auto* stdName = dynamic_cast<const ast::NameExpr*>(core->object.get());
+  if (stdName == nullptr || stdName->name != "std") {
+    return std::nullopt;
+  }
+  return leaf->fieldName;
+}
 
 class ModuleEmitter {
   struct FieldLayout {
@@ -54,6 +121,13 @@ public:
   std::string emit(const ast::SourceFile& file) {
     collectStructs(file);
     collectMethods(file);
+    for (const auto& decl : file.declarations) {
+      if (const auto* fn = dynamic_cast<const ast::FnDecl*>(decl.get())) {
+        if (fn->genericParams.empty()) {
+          registerFunctionKey(*fn);
+        }
+      }
+    }
     for (const auto& decl : file.declarations) {
       if (const auto* fn = dynamic_cast<const ast::FnDecl*>(decl.get())) {
         if (fn->genericParams.empty()) {
@@ -269,19 +343,72 @@ private:
     return module_.getOrInsertFunction("puts", fnTy);
   }
 
+  llvm::FunctionCallee printfFunction() {
+    auto* ptrTy = llvm::PointerType::getUnqual(context_);
+    auto* fnTy = llvm::FunctionType::get(llvm::Type::getInt32Ty(context_), {ptrTy}, true);
+    return module_.getOrInsertFunction("printf", fnTy);
+  }
+
+  llvm::FunctionCallee scanfFunction() {
+    auto* ptrTy = llvm::PointerType::getUnqual(context_);
+    auto* fnTy = llvm::FunctionType::get(llvm::Type::getInt32Ty(context_), {ptrTy}, true);
+    return module_.getOrInsertFunction("scanf", fnTy);
+  }
+
+  std::string functionKey(const ast::FnDecl& fn) const {
+    return fn.modulePath.segments.empty() ? fn.name : qualifiedName(fn.modulePath, fn.name);
+  }
+
+  void registerFunctionKey(const ast::FnDecl& fn) {
+    const std::string key = functionKey(fn);
+    simpleFunctionKeys_[fn.name].push_back(key);
+  }
+
+  std::optional<std::string> resolveFunctionKey(const ast::Path& path) const {
+    if (path.segments.empty()) {
+      return std::nullopt;
+    }
+    if (path.segments.size() == 1) {
+      const auto it = simpleFunctionKeys_.find(path.segments.front());
+      if (it != simpleFunctionKeys_.end() && it->second.size() == 1) {
+        return it->second.front();
+      }
+      return std::nullopt;
+    }
+    if (currentDecl_ != nullptr) {
+      for (const auto& import : currentDecl_->imports) {
+        if (!import.alias.has_value() || *import.alias != path.segments.front()) {
+          continue;
+        }
+        ast::Path resolved = import.path;
+        resolved.segments.insert(resolved.segments.end(), path.segments.begin() + 1, path.segments.end());
+        const std::string key = joinPath(resolved.segments);
+        if (functions_.contains(key)) {
+          return key;
+        }
+      }
+    }
+    const std::string key = joinPath(path.segments);
+    if (functions_.contains(key)) {
+      return key;
+    }
+    return std::nullopt;
+  }
+
   void declareFunction(const ast::FnDecl& fn) {
     std::vector<llvm::Type*> params;
     params.reserve(fn.params.size());
     for (const auto& param : fn.params) {
       params.push_back(parameterTypeFromAst(param.type.get()));
     }
+    const std::string key = functionKey(fn);
     auto* fnType = llvm::FunctionType::get(typeFromAst(fn.returnType.get()), params, false);
-    auto* function = llvm::Function::Create(fnType, llvm::Function::ExternalLinkage, fn.name, module_);
+    auto* function = llvm::Function::Create(fnType, llvm::Function::ExternalLinkage, manglePath(key), module_);
     std::size_t index = 0;
     for (auto& arg : function->args()) {
       arg.setName(fn.params[index++].name);
     }
-    functions_.emplace(fn.name, function);
+    functions_.emplace(key, function);
   }
 
   void declareMethods() {
@@ -314,7 +441,9 @@ private:
   }
 
   void emitFunction(const ast::FnDecl& fn) {
-    llvm::Function* function = functions_.at(fn.name);
+    const ast::Decl* previousDecl = currentDecl_;
+    currentDecl_ = &fn;
+    llvm::Function* function = functions_.at(functionKey(fn));
     auto* entry = llvm::BasicBlock::Create(context_, "entry", function);
     builder_.SetInsertPoint(entry);
     values_.clear();
@@ -339,6 +468,7 @@ private:
       emitBlock(*fn.body);
     }
     emitDefaultReturn(function);
+    currentDecl_ = previousDecl;
   }
 
   void emitMethods() {
@@ -770,7 +900,58 @@ private:
     return builder_.CreateInBoundsGEP(arrayType, slot, {zero, zero}, name->name + ".data");
   }
 
+  llvm::Value* emitReadlnI64() {
+    llvm::Function* function = builder_.GetInsertBlock()->getParent();
+    auto* slot = createEntryAlloca(function, "readln.value", llvm::Type::getInt64Ty(context_));
+    auto* format = builder_.CreateGlobalStringPtr("%lld", ".scanf.i64");
+    builder_.CreateCall(scanfFunction(), {format, slot});
+    return builder_.CreateLoad(llvm::Type::getInt64Ty(context_), slot, "readln.load");
+  }
+
+  llvm::Value* emitPrintCall(std::string_view name, const ast::List<ast::Expr>& callArguments) {
+    if (name == "readln_i64") {
+      return emitReadlnI64();
+    }
+    std::vector<llvm::Value*> arguments;
+    if (name == "print") {
+      arguments.push_back(builder_.CreateGlobalStringPtr("%s", ".printf.str"));
+    } else if (name == "println") {
+      arguments.push_back(builder_.CreateGlobalStringPtr("%s\n", ".printf.strln"));
+    } else if (name == "print_i64") {
+      arguments.push_back(builder_.CreateGlobalStringPtr("%lld", ".printf.i64"));
+    } else if (name == "println_i64") {
+      arguments.push_back(builder_.CreateGlobalStringPtr("%lld\n", ".printf.i64ln"));
+    } else {
+      return nullptr;
+    }
+    if (!callArguments.empty() && callArguments.front() != nullptr) {
+      arguments.push_back(emitExpr(*callArguments.front()));
+    }
+    builder_.CreateCall(printfFunction(), arguments);
+    return llvm::Constant::getNullValue(llvm::Type::getInt64Ty(context_));
+  }
+
   llvm::Value* emitCall(const ast::CallExpr& call) {
+    if (call.callee != nullptr) {
+      if (auto builtinName = qualifiedCoreBuiltinName(*call.callee)) {
+        if (auto* result = emitPrintCall(*builtinName, call.arguments)) {
+          return result;
+        }
+      }
+      ast::Path path = pathFromFieldAccess(*call.callee);
+      if (!path.segments.empty()) {
+        if (auto resolved = resolveFunctionKey(path)) {
+          auto* function = functions_.at(*resolved);
+          std::vector<llvm::Value*> arguments;
+          arguments.reserve(call.arguments.size());
+          for (std::size_t i = 0; i < call.arguments.size(); ++i) {
+            llvm::Type* expectedType = i < function->arg_size() ? function->getFunctionType()->getParamType(i) : llvm::Type::getInt64Ty(context_);
+            arguments.push_back(call.arguments[i] ? emitCallArgument(*call.arguments[i], expectedType) : llvm::ConstantInt::get(llvm::Type::getInt64Ty(context_), 0, true));
+          }
+          return builder_.CreateCall(function, arguments, function->getReturnType()->isVoidTy() ? "" : "calltmp");
+        }
+      }
+    }
     if (const auto* methodCallee = dynamic_cast<const ast::FieldAccessExpr*>(call.callee.get())) {
       if (auto* result = emitMethodCall(*methodCallee, call.arguments)) {
         return result;
@@ -779,6 +960,9 @@ private:
     const auto* callee = dynamic_cast<const ast::NameExpr*>(call.callee.get());
     if (callee == nullptr) {
       return llvm::ConstantInt::get(llvm::Type::getInt64Ty(context_), 0, true);
+    }
+    if (auto* builtin = emitPrintCall(callee->name, call.arguments)) {
+      return builtin;
     }
     if (functions_.contains(callee->name)) {
       auto* function = functions_.at(callee->name);
@@ -896,6 +1080,8 @@ private:
   llvm::Module module_;
   llvm::IRBuilder<> builder_;
   std::unordered_map<std::string, llvm::Function*> functions_;
+  std::unordered_map<std::string, std::vector<std::string>> simpleFunctionKeys_;
+  const ast::Decl* currentDecl_ = nullptr;
   std::unordered_map<std::string, llvm::AllocaInst*> values_;
   std::unordered_map<std::string, llvm::Value*> pointerValues_;
   std::unordered_map<std::string, llvm::Value*> arrayPointers_;

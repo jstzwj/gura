@@ -17,8 +17,9 @@ bool isIdentifierContinue(char c) {
 
 TokenKind keywordKind(std::string_view text) {
   static const std::unordered_map<std::string_view, TokenKind> keywords = {
-      {"fn", TokenKind::KwFn},           {"struct", TokenKind::KwStruct}, {"enum", TokenKind::KwEnum},
-      {"trait", TokenKind::KwTrait},     {"impl", TokenKind::KwImpl},     {"let", TokenKind::KwLet},
+      {"fn", TokenKind::KwFn},           {"module", TokenKind::KwModule}, {"import", TokenKind::KwImport},
+      {"struct", TokenKind::KwStruct},   {"enum", TokenKind::KwEnum},     {"trait", TokenKind::KwTrait},
+      {"impl", TokenKind::KwImpl},       {"let", TokenKind::KwLet},
       {"var", TokenKind::KwVar},         {"move", TokenKind::KwMove},     {"new", TokenKind::KwNew},
       {"enter", TokenKind::KwEnter},     {"explore", TokenKind::KwExplore}, {"freeze", TokenKind::KwFreeze},
       {"merge", TokenKind::KwMerge},     {"cown", TokenKind::KwCown},     {"acquire", TokenKind::KwAcquire},
@@ -48,6 +49,8 @@ std::string_view tokenKindName(TokenKind kind) {
   case TokenKind::StringLiteral: return "string_literal";
   case TokenKind::CharLiteral: return "char_literal";
   case TokenKind::KwFn: return "fn";
+  case TokenKind::KwModule: return "module";
+  case TokenKind::KwImport: return "import";
   case TokenKind::KwStruct: return "struct";
   case TokenKind::KwEnum: return "enum";
   case TokenKind::KwTrait: return "trait";

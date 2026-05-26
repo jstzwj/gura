@@ -141,6 +141,22 @@ if(BUILD_TESTING)
     set_tests_properties(gura_run_hello PROPERTIES DEPENDS gura_build_hello PASS_REGULAR_EXPRESSION "hello")
 
     add_test(
+      NAME gura_build_stdio
+      COMMAND $<TARGET_FILE:gura> build ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/stdio.gura -o ${CMAKE_CURRENT_BINARY_DIR}/stdio
+    )
+    set_tests_properties(gura_build_stdio PROPERTIES ENVIRONMENT "GURA_CLANG=${GURA_CLANGXX}")
+    add_test(NAME gura_run_stdio COMMAND ${CMAKE_CURRENT_BINARY_DIR}/stdio)
+    set_tests_properties(gura_run_stdio PROPERTIES DEPENDS gura_build_stdio PASS_REGULAR_EXPRESSION "answer: 42")
+
+    add_test(
+      NAME gura_build_stdio_qualified
+      COMMAND $<TARGET_FILE:gura> build ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/stdio_qualified.gura -o ${CMAKE_CURRENT_BINARY_DIR}/stdio_qualified
+    )
+    set_tests_properties(gura_build_stdio_qualified PROPERTIES ENVIRONMENT "GURA_CLANG=${GURA_CLANGXX}")
+    add_test(NAME gura_run_stdio_qualified COMMAND ${CMAKE_CURRENT_BINARY_DIR}/stdio_qualified)
+    set_tests_properties(gura_run_stdio_qualified PROPERTIES DEPENDS gura_build_stdio_qualified PASS_REGULAR_EXPRESSION "qualified: 42")
+
+    add_test(
       NAME gura_build_array_swap
       COMMAND $<TARGET_FILE:gura> build ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/array_swap.gura -o ${CMAKE_CURRENT_BINARY_DIR}/array_swap
     )
@@ -155,5 +171,61 @@ if(BUILD_TESTING)
     set_tests_properties(gura_build_array_param_swap PROPERTIES ENVIRONMENT "GURA_CLANG=${GURA_CLANGXX}")
     add_test(NAME gura_run_array_param_swap COMMAND ${CMAKE_CURRENT_BINARY_DIR}/array_param_swap)
     set_tests_properties(gura_run_array_param_swap PROPERTIES DEPENDS gura_build_array_param_swap)
+
+    add_test(
+      NAME gura_build_array_partition
+      COMMAND $<TARGET_FILE:gura> build ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/array_partition.gura -o ${CMAKE_CURRENT_BINARY_DIR}/array_partition
+    )
+    set_tests_properties(gura_build_array_partition PROPERTIES ENVIRONMENT "GURA_CLANG=${GURA_CLANGXX}")
+    add_test(NAME gura_run_array_partition COMMAND ${CMAKE_CURRENT_BINARY_DIR}/array_partition)
+    set_tests_properties(gura_run_array_partition PROPERTIES DEPENDS gura_build_array_partition)
+
+    add_test(
+      NAME gura_build_quicksort
+      COMMAND $<TARGET_FILE:gura> build ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/quicksort.gura -o ${CMAKE_CURRENT_BINARY_DIR}/quicksort
+    )
+    set_tests_properties(gura_build_quicksort PROPERTIES ENVIRONMENT "GURA_CLANG=${GURA_CLANGXX}")
+    add_test(NAME gura_run_quicksort COMMAND ${CMAKE_CURRENT_BINARY_DIR}/quicksort)
+    set_tests_properties(gura_run_quicksort PROPERTIES DEPENDS gura_build_quicksort)
+
+    add_test(
+      NAME gura_build_package_basic
+      COMMAND $<TARGET_FILE:gura> build ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/package_basic -o ${CMAKE_CURRENT_BINARY_DIR}/package_basic
+    )
+    set_tests_properties(gura_build_package_basic PROPERTIES ENVIRONMENT "GURA_CLANG=${GURA_CLANGXX}")
+    add_test(NAME gura_run_package_basic COMMAND ${CMAKE_CURRENT_BINARY_DIR}/package_basic)
+    set_tests_properties(gura_run_package_basic PROPERTIES DEPENDS gura_build_package_basic)
+
+    add_test(
+      NAME gura_build_package_struct
+      COMMAND $<TARGET_FILE:gura> build ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/package_struct -o ${CMAKE_CURRENT_BINARY_DIR}/package_struct
+    )
+    set_tests_properties(gura_build_package_struct PROPERTIES ENVIRONMENT "GURA_CLANG=${GURA_CLANGXX}")
+    add_test(NAME gura_run_package_struct COMMAND ${CMAKE_CURRENT_BINARY_DIR}/package_struct)
+    set_tests_properties(gura_run_package_struct PROPERTIES DEPENDS gura_build_package_struct)
+
+    add_test(
+      NAME gura_build_module_import_basic
+      COMMAND $<TARGET_FILE:gura> build ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/module_import_basic -o ${CMAKE_CURRENT_BINARY_DIR}/module_import_basic
+    )
+    set_tests_properties(gura_build_module_import_basic PROPERTIES ENVIRONMENT "GURA_CLANG=${GURA_CLANGXX}")
+    add_test(NAME gura_run_module_import_basic COMMAND ${CMAKE_CURRENT_BINARY_DIR}/module_import_basic)
+    set_tests_properties(gura_run_module_import_basic PROPERTIES DEPENDS gura_build_module_import_basic)
+
+    add_test(
+      NAME gura_build_module_import_alias
+      COMMAND $<TARGET_FILE:gura> build ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/module_import_alias -o ${CMAKE_CURRENT_BINARY_DIR}/module_import_alias
+    )
+    set_tests_properties(gura_build_module_import_alias PROPERTIES ENVIRONMENT "GURA_CLANG=${GURA_CLANGXX}")
+    add_test(NAME gura_run_module_import_alias COMMAND ${CMAKE_CURRENT_BINARY_DIR}/module_import_alias)
+    set_tests_properties(gura_run_module_import_alias PROPERTIES DEPENDS gura_build_module_import_alias)
+
+    add_test(
+      NAME gura_build_module_same_name
+      COMMAND $<TARGET_FILE:gura> build ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/module_same_name -o ${CMAKE_CURRENT_BINARY_DIR}/module_same_name
+    )
+    set_tests_properties(gura_build_module_same_name PROPERTIES ENVIRONMENT "GURA_CLANG=${GURA_CLANGXX}")
+    add_test(NAME gura_run_module_same_name COMMAND ${CMAKE_CURRENT_BINARY_DIR}/module_same_name)
+    set_tests_properties(gura_run_module_same_name PROPERTIES DEPENDS gura_build_module_same_name)
   endif()
 endif()

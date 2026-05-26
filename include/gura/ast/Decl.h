@@ -9,7 +9,20 @@
 
 namespace gura::ast {
 
-struct Decl : Node {};
+struct Path {
+  std::vector<std::string> segments;
+};
+
+struct ImportDecl {
+  Path path;
+  std::optional<std::string> alias;
+  Span span;
+};
+
+struct Decl : Node {
+  Path modulePath;
+  std::vector<ImportDecl> imports;
+};
 
 struct Param {
   std::string name;
@@ -59,6 +72,9 @@ struct ImplDecl : Decl {
 };
 
 struct SourceFile : Node {
+  std::optional<Path> explicitModule;
+  Path resolvedModule;
+  std::vector<ImportDecl> imports;
   List<Decl> declarations;
 };
 

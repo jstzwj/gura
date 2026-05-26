@@ -563,7 +563,7 @@ FFI 函数默认视为 unsafe。可通过契约声明能力行为：
 ```gura
 @ffi
 @unsafe_contract("returns_imm")
-fn intern_string(ptr: Ptr[U8], len: USize): imm String
+fn intern_string(ptr: Ptr<U8>, len: USize): imm String
 ```
 
 FFI 不得：

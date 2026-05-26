@@ -76,6 +76,80 @@ fn main(): i64 {
   CHECK(diagnostics.find("argument 1 type 'i64' does not match expected type 'cstring'") != std::string::npos);
 }
 
+TEST_CASE("sema accepts core string output builtins") {
+  CHECK(checkSource(R"gura(
+fn main(): i64 {
+  print("hello")
+  println("world")
+  return 0
+}
+)gura"));
+}
+
+TEST_CASE("sema accepts core i64 I/O builtins") {
+  CHECK(checkSource(R"gura(
+fn main(): i64 {
+  print_i64(1)
+  println_i64(2)
+  let value: i64 = readln_i64()
+  return value
+}
+)gura"));
+}
+
+TEST_CASE("sema accepts qualified std core builtins") {
+  CHECK(checkSource(R"gura(
+fn main(): i64 {
+  std.core.print("hello")
+  std.core.println("world")
+  std.core.print_i64(1)
+  std.core.println_i64(2)
+  let value: i64 = std.core.readln_i64()
+  return value
+}
+)gura"));
+}
+
+TEST_CASE("sema rejects qualified std core builtin argument mismatches") {
+  std::string diagnostics;
+  CHECK_FALSE(checkSource(R"gura(
+fn main(): i64 {
+  std.core.println(1)
+  return 0
+}
+)gura", &diagnostics));
+  CHECK(diagnostics.find("argument 1 type 'i64' does not match expected type 'cstring'") != std::string::npos);
+
+  diagnostics.clear();
+  CHECK_FALSE(checkSource(R"gura(
+fn main(): i64 {
+  std.core.println_i64("hello")
+  return 0
+}
+)gura", &diagnostics));
+  CHECK(diagnostics.find("argument 1 type 'cstring' does not match expected type 'i64'") != std::string::npos);
+}
+
+TEST_CASE("sema rejects core output builtin argument mismatches") {
+  std::string diagnostics;
+  CHECK_FALSE(checkSource(R"gura(
+fn main(): i64 {
+  println(1)
+  return 0
+}
+)gura", &diagnostics));
+  CHECK(diagnostics.find("argument 1 type 'i64' does not match expected type 'cstring'") != std::string::npos);
+
+  diagnostics.clear();
+  CHECK_FALSE(checkSource(R"gura(
+fn main(): i64 {
+  println_i64("hello")
+  return 0
+}
+)gura", &diagnostics));
+  CHECK(diagnostics.find("argument 1 type 'cstring' does not match expected type 'i64'") != std::string::npos);
+}
+
 TEST_CASE("sema accepts i64 arithmetic and comparisons") {
   CHECK(checkSource(R"gura(
 fn main(): bool { return 1 + 2 * 3 == 7 }

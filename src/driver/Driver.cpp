@@ -9,20 +9,32 @@
 
 #include <fmt/format.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <optional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <system_error>
 #include <unistd.h>
+#include <vector>
 
 namespace gura {
 
 namespace {
+
+struct PackageInput {
+  std::filesystem::path root;
+  std::vector<std::filesystem::path> files;
+};
+
+struct ParsedPackage {
+  std::filesystem::path root;
+  std::vector<std::unique_ptr<ast::SourceFile>> files;
+};
 
 bool hasGenericFunctions(const ast::SourceFile& file) {
   for (const auto& decl : file.declarations) {
@@ -64,6 +76,102 @@ std::string shellQuote(std::string_view value) {
 std::filesystem::path temporaryIrPath() {
   static int counter = 0;
   return std::filesystem::temp_directory_path() / fmt::format("gura-{}-{}.ll", static_cast<long>(::getpid()), counter++);
+}
+
+std::string relativeSortKey(const std::filesystem::path& root, const std::filesystem::path& path) {
+  std::error_code error;
+  const auto relative = std::filesystem::relative(path, root, error);
+  if (error) {
+    return path.generic_string();
+  }
+  return relative.generic_string();
+}
+
+PackageInput collectPackageInput(const std::filesystem::path& inputPath) {
+  std::error_code error;
+  if (std::filesystem::is_directory(inputPath, error)) {
+    PackageInput input{inputPath, {}};
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(inputPath, std::filesystem::directory_options::skip_permission_denied)) {
+      if (entry.is_regular_file() && entry.path().extension() == ".gura") {
+        input.files.push_back(entry.path());
+      }
+    }
+    std::ranges::sort(input.files, [&](const auto& lhs, const auto& rhs) {
+      return relativeSortKey(input.root, lhs) < relativeSortKey(input.root, rhs);
+    });
+    if (input.files.empty()) {
+      throw std::runtime_error(fmt::format("package directory contains no .gura files: {}", inputPath.string()));
+    }
+    return input;
+  }
+
+  if (error) {
+    throw std::runtime_error(fmt::format("failed to inspect input path '{}': {}", inputPath.string(), error.message()));
+  }
+  return PackageInput{inputPath.parent_path(), {inputPath}};
+}
+
+ast::Path modulePathFromFile(const PackageInput& input, const std::filesystem::path& filePath) {
+  const std::string key = relativeSortKey(input.root, filePath);
+  std::filesystem::path relative(key);
+  relative.replace_extension();
+  ast::Path path;
+  for (const auto& part : relative) {
+    const std::string segment = part.string();
+    if (!segment.empty() && segment != ".") {
+      path.segments.push_back(segment);
+    }
+  }
+  if (path.segments.empty()) {
+    path.segments.push_back(filePath.stem().string());
+  }
+  return path;
+}
+
+std::unique_ptr<ParsedPackage> parsePackage(const PackageInput& input, SourceManager& sources, DiagnosticEngine& diagnostics) {
+  auto package = std::make_unique<ParsedPackage>();
+  package->root = input.root;
+  for (const auto& filePath : input.files) {
+    const auto id = sources.loadFile(filePath);
+    Lexer lexer(sources.contents(id));
+    const auto tokens = lexer.lexAll();
+    Parser parser(tokens, diagnostics);
+    auto file = parser.parseSourceFile();
+    if (file == nullptr || diagnostics.hasError()) {
+      return nullptr;
+    }
+    if (file->explicitModule.has_value()) {
+      file->resolvedModule = *file->explicitModule;
+    } else if (input.files.size() > 1) {
+      file->resolvedModule = modulePathFromFile(input, filePath);
+    }
+    package->files.push_back(std::move(file));
+  }
+  return package;
+}
+
+std::unique_ptr<ast::SourceFile> flattenPackageForLegacySema(ParsedPackage& package) {
+  auto packageFile = std::make_unique<ast::SourceFile>();
+  for (auto& file : package.files) {
+    for (auto& decl : file->declarations) {
+      decl->modulePath = file->resolvedModule;
+      decl->imports = file->imports;
+      packageFile->declarations.push_back(std::move(decl));
+    }
+  }
+  return packageFile;
+}
+
+std::unique_ptr<ast::SourceFile> parsePackagePath(std::string_view path, SourceManager& sources, DiagnosticEngine& diagnostics, std::size_t* fileCount = nullptr) {
+  const PackageInput input = collectPackageInput(std::filesystem::path(path));
+  if (fileCount != nullptr) {
+    *fileCount = input.files.size();
+  }
+  auto package = parsePackage(input, sources, diagnostics);
+  if (package == nullptr) {
+    return nullptr;
+  }
+  return flattenPackageForLegacySema(*package);
 }
 
 class TemporaryFile {
@@ -125,58 +233,70 @@ int Driver::lexFile(std::string_view path) {
 }
 
 int Driver::parseFile(std::string_view path) {
-  SourceManager sources;
-  const auto id = sources.loadFile(std::string(path));
-  DiagnosticEngine diagnostics;
-  Lexer lexer(sources.contents(id));
-  const auto tokens = lexer.lexAll();
-  Parser parser(tokens, diagnostics);
-  const auto file = parser.parseSourceFile();
-  if (diagnostics.hasError()) {
-    std::cerr << diagnostics.format();
+  try {
+    SourceManager sources;
+    DiagnosticEngine diagnostics;
+    std::size_t fileCount = 0;
+    const auto file = parsePackagePath(path, sources, diagnostics, &fileCount);
+    if (file == nullptr || diagnostics.hasError()) {
+      std::cerr << diagnostics.format();
+      return 1;
+    }
+    std::cout << fmt::format("parsed {} declaration(s) from {} file(s)\n", file->declarations.size(), fileCount);
+    return 0;
+  } catch (const std::exception& error) {
+    std::cerr << error.what() << '\n';
     return 1;
   }
-  std::cout << fmt::format("parsed {} declaration(s)\n", file->declarations.size());
-  return 0;
 }
 
 int Driver::checkFile(std::string_view path) {
-  SourceManager sources;
-  const auto id = sources.loadFile(std::string(path));
-  DiagnosticEngine diagnostics;
-  Lexer lexer(sources.contents(id));
-  const auto tokens = lexer.lexAll();
-  Parser parser(tokens, diagnostics);
-  const auto file = parser.parseSourceFile();
-  hir::Sema sema(diagnostics);
-  if (!sema.check(*file)) {
-    std::cerr << diagnostics.format();
+  try {
+    SourceManager sources;
+    DiagnosticEngine diagnostics;
+    const auto file = parsePackagePath(path, sources, diagnostics);
+    if (file == nullptr || diagnostics.hasError()) {
+      std::cerr << diagnostics.format();
+      return 1;
+    }
+    hir::Sema sema(diagnostics);
+    if (!sema.check(*file)) {
+      std::cerr << diagnostics.format();
+      return 1;
+    }
+    std::cout << "check ok\n";
+    return 0;
+  } catch (const std::exception& error) {
+    std::cerr << error.what() << '\n';
     return 1;
   }
-  std::cout << "check ok\n";
-  return 0;
 }
 
 int Driver::emitLlvm(std::string_view path) {
-  SourceManager sources;
-  const auto id = sources.loadFile(std::string(path));
-  DiagnosticEngine diagnostics;
-  Lexer lexer(sources.contents(id));
-  const auto tokens = lexer.lexAll();
-  Parser parser(tokens, diagnostics);
-  const auto file = parser.parseSourceFile();
-  hir::Sema sema(diagnostics);
-  if (!sema.check(*file)) {
-    std::cerr << diagnostics.format();
+  try {
+    SourceManager sources;
+    DiagnosticEngine diagnostics;
+    const auto file = parsePackagePath(path, sources, diagnostics);
+    if (file == nullptr || diagnostics.hasError()) {
+      std::cerr << diagnostics.format();
+      return 1;
+    }
+    hir::Sema sema(diagnostics);
+    if (!sema.check(*file)) {
+      std::cerr << diagnostics.format();
+      return 1;
+    }
+    if (hasGenericFunctions(*file)) {
+      std::cerr << "LLVM codegen for generic functions is not supported yet\n";
+      return 1;
+    }
+    LLVMCodeGen codegen;
+    std::cout << codegen.emitModule(*file);
+    return 0;
+  } catch (const std::exception& error) {
+    std::cerr << error.what() << '\n';
     return 1;
   }
-  if (hasGenericFunctions(*file)) {
-    std::cerr << "LLVM codegen for generic functions is not supported yet\n";
-    return 1;
-  }
-  LLVMCodeGen codegen;
-  std::cout << codegen.emitModule(*file);
-  return 0;
 }
 
 int Driver::buildExecutable(std::span<const char* const> args) {
@@ -204,12 +324,12 @@ int Driver::buildExecutable(std::span<const char* const> args) {
   }
   try {
     SourceManager sources;
-    const auto id = sources.loadFile(inputPath.string());
     DiagnosticEngine diagnostics;
-    Lexer lexer(sources.contents(id));
-    const auto tokens = lexer.lexAll();
-    Parser parser(tokens, diagnostics);
-    const auto file = parser.parseSourceFile();
+    const auto file = parsePackagePath(inputPath.string(), sources, diagnostics);
+    if (file == nullptr || diagnostics.hasError()) {
+      std::cerr << diagnostics.format();
+      return 1;
+    }
     hir::Sema sema(diagnostics);
     if (!sema.check(*file)) {
       std::cerr << diagnostics.format();

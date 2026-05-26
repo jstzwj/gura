@@ -1,0 +1,5 @@
+module app
+
+fn main(): i64 {
+  return a.helper() + b.helper() - 42
+}

@@ -30,6 +30,15 @@ fn main(): i64 {
 )gura");
 }
 
+TEST_CASE("parser parses qualified std core builtin calls") {
+  requireParses(R"gura(
+fn main(): i64 {
+  std.core.println_i64(42)
+  return 0
+}
+)gura");
+}
+
 TEST_CASE("parser parses binary expressions") {
   requireParses(R"gura(
 fn main(): i64 {

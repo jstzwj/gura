@@ -57,7 +57,7 @@ trait Named {
   fn name(self: imm): i64
 }
 
-fn get_name[T: Named](value: imm T): i64 {
+fn get_name<T: Named>(value: imm T): i64 {
   return value.name()
 }
 

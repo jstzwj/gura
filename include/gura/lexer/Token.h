@@ -17,6 +17,8 @@ enum class TokenKind {
   CharLiteral,
 
   KwFn,
+  KwModule,
+  KwImport,
   KwStruct,
   KwEnum,
   KwTrait,
