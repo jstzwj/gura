@@ -118,6 +118,22 @@ fn main(): i64 {
   CHECK(diagnostics.find("merge requires an active region") != std::string::npos);
 }
 
+TEST_CASE("sema rejects merge inside explore region") {
+  std::string diagnostics;
+  CHECK_FALSE(checkSource(R"gura(
+fn main(): i64 {
+  let parent: iso Box = new iso Box
+  let child: iso Box = new iso Box
+  explore parent as bridge {
+    let y = merge(move child)
+    return 0
+  }
+  return 0
+}
+)gura", &diagnostics));
+  CHECK(diagnostics.find("merge requires an active region") != std::string::npos);
+}
+
 TEST_CASE("sema rejects freeze and merge on non-iso") {
   std::string diagnostics;
   CHECK_FALSE(checkSource(R"gura(

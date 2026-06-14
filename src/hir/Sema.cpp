@@ -205,6 +205,39 @@ Sema::BindingState* Sema::lookup(const std::string& name) {
   return nullptr;
 }
 
+std::vector<Sema::SuspendedBinding> Sema::suspendOuterRegionBindings() {
+  std::vector<SuspendedBinding> suspended;
+  if (scopes_.empty()) {
+    return suspended;
+  }
+  for (std::size_t scopeIndex = 0; scopeIndex + 1 < scopes_.size(); ++scopeIndex) {
+    for (auto& [name, binding] : scopes_[scopeIndex]) {
+      const Type adapted = adaptForSuspendedScope(binding.type);
+      if (adapted.capability == binding.type.capability) {
+        continue;
+      }
+      suspended.push_back(SuspendedBinding{scopeIndex, name, binding.type, binding.view});
+      binding.type = adapted;
+      binding.view = BindingView::Suspended;
+    }
+  }
+  return suspended;
+}
+
+void Sema::restoreSuspendedBindings(const std::vector<SuspendedBinding>& suspended) {
+  for (auto it = suspended.rbegin(); it != suspended.rend(); ++it) {
+    if (it->scopeIndex >= scopes_.size()) {
+      continue;
+    }
+    auto binding = scopes_[it->scopeIndex].find(it->name);
+    if (binding == scopes_[it->scopeIndex].end()) {
+      continue;
+    }
+    binding->second.type = it->type;
+    binding->second.view = it->view;
+  }
+}
+
 void Sema::collectModules(const ast::SourceFile& file) {
   modules_.clear();
   for (const auto& decl : file.declarations) {
@@ -536,7 +569,12 @@ bool Sema::checkFn(const ast::FnDecl& fn) {
     if (param.type == nullptr) {
       continue;
     }
-    declare(param.name, BindingState{typeFromAst(*param.type), false, false, param.type->span, BindingOrigin::Ordinary, regionDepth_});
+    BindingState state;
+    state.type = typeFromAst(*param.type);
+    state.span = param.type->span;
+    state.origin = BindingOrigin::Ordinary;
+    state.regionDepth = regionDepth_;
+    declare(param.name, std::move(state));
   }
   if (fn.body != nullptr) {
     checkBlock(*fn.body);
@@ -560,7 +598,12 @@ bool Sema::checkMethod(const ast::FnDecl& fn, const std::string& selfTypeName) {
     if (i == 0 && param.name == "self") {
       paramType.name = selfTypeName;
     }
-    declare(param.name, BindingState{paramType, false, false, param.type->span, BindingOrigin::Ordinary, regionDepth_});
+    BindingState state;
+    state.type = paramType;
+    state.span = param.type->span;
+    state.origin = BindingOrigin::Ordinary;
+    state.regionDepth = regionDepth_;
+    declare(param.name, std::move(state));
   }
   if (fn.body != nullptr) {
     checkBlock(*fn.body);
@@ -654,8 +697,12 @@ Type Sema::checkName(const ast::NameExpr& expr, ValueContext context) {
     report(expr.span, fmt::format("undefined binding '{}'", expr.name));
     return invalidType();
   }
-  if (binding->moved) {
+  if (binding->availability == BindingAvailability::Moved) {
     report(expr.span, fmt::format("binding '{}' was already moved", expr.name));
+    return invalidType();
+  }
+  if (binding->availability == BindingAvailability::OpenBorrowed) {
+    report(expr.span, fmt::format("binding '{}' is currently open-borrowed", expr.name));
     return invalidType();
   }
   if (context == ValueContext::Ordinary && binding->type.capability == Capability::Iso) {
@@ -676,11 +723,15 @@ Type Sema::checkMove(const ast::MoveExpr& expr) {
     report(name->span, fmt::format("undefined binding '{}'", name->name));
     return invalidType();
   }
-  if (binding->moved) {
+  if (binding->availability == BindingAvailability::Moved) {
     report(name->span, fmt::format("binding '{}' was already moved", name->name));
     return invalidType();
   }
-  binding->moved = true;
+  if (binding->availability == BindingAvailability::OpenBorrowed) {
+    report(name->span, fmt::format("binding '{}' is currently open-borrowed", name->name));
+    return invalidType();
+  }
+  binding->availability = BindingAvailability::Moved;
   return binding->type;
 }
 
@@ -717,6 +768,9 @@ Type Sema::checkNew(const ast::NewExpr& expr) {
       continue;
     }
     Type value = init.value ? checkExpr(*init.value) : unitType();
+    if (result.capability == Capability::Iso && init.value != nullptr) {
+      checkIsoInitializerArg(*init.value, value, fieldIt->second.type, init.value->span);
+    }
     if (!sameType(fieldIt->second.type, value)) {
       report(init.value ? init.value->span : init.span, fmt::format("initializer type '{}' does not match field type '{}'", value.name, fieldIt->second.type.name));
     }
@@ -729,6 +783,40 @@ Type Sema::checkNew(const ast::NewExpr& expr) {
   return result;
 }
 
+bool Sema::checkIsoInitializerArg(const ast::Expr& valueExpr, const Type& value, const Type& field, Span valueSpan) {
+  if (isInvalid(value) || isInvalid(field)) {
+    return true;
+  }
+  if (value.capability == Capability::None || value.capability == Capability::Imm) {
+    return true;
+  }
+  if (value.capability == Capability::Iso) {
+    if (dynamic_cast<const ast::MoveExpr*>(&valueExpr) != nullptr) {
+      return true;
+    }
+    report(valueSpan, "iso initializer field requires move of iso value");
+    return false;
+  }
+  if (value.capability == Capability::Mut && isFreshMutConstructorExpr(valueExpr)) {
+    return true;
+  }
+  if (value.capability == Capability::Mut) {
+    report(valueSpan, "new iso initializer requires fresh mut constructor expression");
+    return false;
+  }
+  if (value.capability == Capability::Tmp || value.capability == Capability::Paused) {
+    report(valueSpan, "tmp or paused value cannot initialize a new iso region");
+    return false;
+  }
+  report(valueSpan, "unsupported new iso initializer capability");
+  return false;
+}
+
+bool Sema::isFreshMutConstructorExpr(const ast::Expr& expr) const {
+  const auto* newExpr = dynamic_cast<const ast::NewExpr*>(&expr);
+  return newExpr != nullptr && newExpr->type != nullptr && capabilityFromAst(newExpr->type->capability) == Capability::Mut;
+}
+
 Type Sema::checkBinding(const ast::BindingExpr& expr) {
   Type init = expr.initializer ? checkExpr(*expr.initializer) : unitType();
   Type declared = expr.type ? typeFromAst(*expr.type) : init;
@@ -738,8 +826,15 @@ Type Sema::checkBinding(const ast::BindingExpr& expr) {
   if (declared.isArray && init.isArray && init.arrayLength.has_value()) {
     declared.arrayLength = init.arrayLength;
   }
+  checkEscape(init, EscapeTarget::LocalBinding, regionDepth_, expr.initializer ? expr.initializer->span : expr.span);
   BindingOrigin origin = isRegionLocal(init.capability) && regionDepth_ > 0 ? BindingOrigin::RegionLocal : BindingOrigin::Ordinary;
-  declare(expr.name, BindingState{declared, expr.isVar, false, expr.span, origin, regionDepth_});
+  BindingState state;
+  state.type = declared;
+  state.isVar = expr.isVar;
+  state.span = expr.span;
+  state.origin = origin;
+  state.regionDepth = regionDepth_;
+  declare(expr.name, std::move(state));
   return unitType();
 }
 
@@ -761,30 +856,29 @@ Type Sema::checkAssign(const ast::AssignExpr& expr) {
         return invalidType();
       }
       if (value.capability != Capability::Mut) {
-        report(expr.value ? expr.value->span : expr.span, "bridge reassignment requires a mut value");
+        report(expr.value ? expr.value->span : expr.span, "enter bridge reassignment requires a mut value");
         return invalidType();
       }
       if (binding->type.name != value.name) {
-        report(expr.value ? expr.value->span : expr.span, "bridge reassignment must preserve bridge type in this milestone");
+        report(expr.value ? expr.value->span : expr.span, "enter bridge reassignment must preserve bridge type in this milestone");
         return invalidType();
       }
       binding->bridgeReassigned = true;
-      binding->moved = false;
+      binding->availability = BindingAvailability::Available;
       return unitType();
     }
-    if (isRegionLocal(value.capability) && binding->regionDepth < regionDepth_) {
-      report(expr.value ? expr.value->span : expr.span, "region-local value cannot escape its region");
+    if (!checkEscape(value, EscapeTarget::OuterBinding, binding->regionDepth, expr.value ? expr.value->span : expr.span)) {
       return invalidType();
     }
     if (!sameType(binding->type, value)) {
       report(expr.value ? expr.value->span : expr.span, fmt::format("assignment type '{}' does not match binding type '{}'", value.name, binding->type.name));
       return invalidType();
     }
-    binding->moved = false;
+    binding->availability = BindingAvailability::Available;
     return unitType();
   }
   if (const auto* field = dynamic_cast<const ast::FieldAccessExpr*>(expr.target.get())) {
-    return checkFieldAssign(*field, value, expr.value ? expr.value->span : expr.span);
+    return checkFieldAssign(*field, expr.value.get(), value, expr.value ? expr.value->span : expr.span);
   }
   if (const auto* index = dynamic_cast<const ast::IndexExpr*>(expr.target.get())) {
     return checkIndexAssign(*index, value, expr.value ? expr.value->span : expr.span);
@@ -816,15 +910,19 @@ Type Sema::checkFieldAccess(const ast::FieldAccessExpr& expr) {
     report(expr.span, fmt::format("type '{}' has no field '{}'", object.name, expr.fieldName));
     return invalidType();
   }
-  return fieldIt->second.type;
+  if (fieldIt->second.type.capability == Capability::Iso) {
+    report(expr.span, fmt::format("cannot read iso field '{}'; use move or enter", expr.fieldName));
+    return invalidType();
+  }
+  return adaptFieldAccess(object, fieldIt->second.type);
 }
 
-Type Sema::checkFieldAssign(const ast::FieldAccessExpr& target, const Type& value, Span valueSpan) {
+Type Sema::checkFieldAssign(const ast::FieldAccessExpr& target, const ast::Expr* valueExpr, const Type& value, Span valueSpan) {
   Type object = target.object ? checkExpr(*target.object, ValueContext::Operand) : invalidType();
   if (isInvalid(object)) {
     return invalidType();
   }
-  if (object.capability != Capability::Mut) {
+  if (!isWritableReceiver(object.capability)) {
     report(target.object ? target.object->span : target.span, "field assignment requires a mut receiver");
     return invalidType();
   }
@@ -840,6 +938,13 @@ Type Sema::checkFieldAssign(const ast::FieldAccessExpr& target, const Type& valu
   }
   if (!fieldIt->second.isVar) {
     report(target.span, fmt::format("cannot assign to let field '{}'", target.fieldName));
+    return invalidType();
+  }
+  if (!checkEscape(value, EscapeTarget::Field, regionDepth_, valueSpan)) {
+    return invalidType();
+  }
+  if (fieldIt->second.type.capability == Capability::Iso && dynamic_cast<const ast::MoveExpr*>(valueExpr) == nullptr) {
+    report(valueSpan, fmt::format("assignment to iso field '{}' requires move", target.fieldName));
     return invalidType();
   }
   if (!sameType(fieldIt->second.type, value)) {
@@ -1221,9 +1326,7 @@ Type Sema::checkGenericMethodCall(const ast::CallExpr& expr, const ast::FieldAcc
 
 Type Sema::checkReturn(const ast::ReturnExpr& expr) {
   Type actual = expr.value ? checkExpr(*expr.value) : unitType();
-  if (regionDepth_ > 0 && isRegionLocal(actual.capability)) {
-    report(expr.span, "region-local value cannot escape its region");
-  }
+  checkEscape(actual, EscapeTarget::ReturnValue, 0, expr.span);
   if (!sameType(currentReturnType_, actual)) {
     report(expr.span, fmt::format("return type '{}' does not match function return type '{}'", actual.name, currentReturnType_.name));
   }
@@ -1266,32 +1369,56 @@ Type Sema::checkRegion(const ast::RegionExpr& expr) {
     report(expr.source ? expr.source->span : expr.span, "enter/explore source must be an iso binding");
   }
 
-  bool previousMoved = false;
-  if (sourceBinding != nullptr) {
-    previousMoved = sourceBinding->moved;
-    if (!sourceBinding->moved) {
-      sourceBinding->moved = true;
-    }
-  }
+  const BindingAvailability previousAvailability = openBorrowRegionSource(sourceBinding);
 
   ++regionDepth_;
+  const bool isEnter = expr.kind == ast::RegionExpr::Kind::Enter;
+  if (isEnter) {
+    ++mutableRegionDepth_;
+  }
   pushScope();
+  const auto suspended = suspendOuterRegionBindings();
   if (!expr.bindingName.empty() && !isInvalid(source)) {
-    const Capability bindingCapability = expr.kind == ast::RegionExpr::Kind::Enter ? Capability::Mut : Capability::Paused;
-    declare(expr.bindingName, BindingState{Type{bindingCapability, source.name}, bindingCapability == Capability::Mut, false, expr.span, BindingOrigin::RegionBridge, regionDepth_, true});
+    const Capability bindingCapability = isEnter ? Capability::Mut : Capability::Paused;
+    BindingState state;
+    state.type = Type{bindingCapability, source.name};
+    state.isVar = bindingCapability == Capability::Mut;
+    state.span = expr.span;
+    state.origin = BindingOrigin::RegionBridge;
+    state.regionDepth = regionDepth_;
+    state.bridgeSlot = true;
+    declare(expr.bindingName, std::move(state));
   }
   Type result = expr.body ? checkBlock(*expr.body) : unitType();
+  restoreSuspendedBindings(suspended);
   popScope();
+  if (isEnter) {
+    --mutableRegionDepth_;
+  }
   --regionDepth_;
 
-  if (sourceBinding != nullptr) {
-    sourceBinding->moved = previousMoved;
-  }
+  restoreRegionSource(sourceBinding, previousAvailability);
 
-  if (isRegionLocal(result.capability)) {
-    report(expr.span, "region block cannot return mut/tmp/paused values");
-  }
+  checkEscape(result, EscapeTarget::RegionBlockResult, regionDepth_, expr.span);
   return result;
+}
+
+Sema::BindingAvailability Sema::openBorrowRegionSource(BindingState* sourceBinding) {
+  if (sourceBinding == nullptr) {
+    return BindingAvailability::Available;
+  }
+  const BindingAvailability previousAvailability = sourceBinding->availability;
+  if (sourceBinding->availability == BindingAvailability::Available) {
+    sourceBinding->availability = BindingAvailability::OpenBorrowed;
+  }
+  return previousAvailability;
+}
+
+void Sema::restoreRegionSource(BindingState* sourceBinding, BindingAvailability previousAvailability) {
+  if (sourceBinding == nullptr) {
+    return;
+  }
+  sourceBinding->availability = previousAvailability;
 }
 
 Type Sema::checkFreeze(const ast::FreezeExpr& expr) {
@@ -1312,7 +1439,7 @@ Type Sema::checkMerge(const ast::MergeExpr& expr) {
     report(expr.value ? expr.value->span : expr.span, "merge requires move of an iso value");
     return invalidType();
   }
-  if (regionDepth_ == 0) {
+  if (mutableRegionDepth_ == 0) {
     report(expr.span, "merge requires an active region");
   }
   Type input = checkExpr(*expr.value);
@@ -1353,8 +1480,87 @@ Capability Sema::capabilityFromAst(ast::Capability capability) const {
   return Capability::None;
 }
 
+Type Sema::adaptForSuspendedScope(const Type& type) const {
+  Type adapted = type;
+  if (type.capability == Capability::Mut || type.capability == Capability::Tmp || type.capability == Capability::Paused) {
+    adapted.capability = Capability::Paused;
+  }
+  return adapted;
+}
+
+Type Sema::adaptFieldAccess(const Type& receiver, const Type& field) const {
+  Type adapted = field;
+  if (isPlainValueType(field)) {
+    return adapted;
+  }
+  switch (receiver.capability) {
+  case Capability::Mut:
+  case Capability::Tmp:
+    return adapted;
+  case Capability::Paused:
+    if (field.capability == Capability::Mut || field.capability == Capability::Tmp || field.capability == Capability::Paused) {
+      adapted.capability = Capability::Paused;
+    }
+    return adapted;
+  case Capability::Imm:
+    adapted.capability = Capability::Imm;
+    return adapted;
+  case Capability::Iso:
+    return invalidType();
+  case Capability::Cown:
+  case Capability::None:
+    return adapted;
+  }
+  return adapted;
+}
+
+bool Sema::isPlainValueType(const Type& type) const {
+  return type.capability == Capability::None && !type.isArray;
+}
+
+bool Sema::isWritableReceiver(Capability capability) const {
+  return capability == Capability::Mut || capability == Capability::Tmp;
+}
+
 bool Sema::isRegionLocal(Capability capability) const {
   return capability == Capability::Mut || capability == Capability::Tmp || capability == Capability::Paused;
+}
+
+bool Sema::checkEscape(const Type& value, EscapeTarget target, int targetRegionDepth, Span span) {
+  if (isInvalid(value)) {
+    return true;
+  }
+  switch (target) {
+  case EscapeTarget::ReturnValue:
+    if (regionDepth_ > 0 && isRegionLocal(value.capability)) {
+      report(span, "region-local value cannot escape its region");
+      return false;
+    }
+    return true;
+  case EscapeTarget::OuterBinding:
+    if (isRegionLocal(value.capability) && targetRegionDepth < regionDepth_) {
+      report(span, "region-local value cannot escape its region");
+      return false;
+    }
+    return true;
+  case EscapeTarget::Field:
+    if (value.capability == Capability::Paused || value.capability == Capability::Tmp) {
+      report(span, "temporary or paused value cannot be stored in a regular field");
+      return false;
+    }
+    return true;
+  case EscapeTarget::RegionBlockResult:
+    if (isRegionLocal(value.capability)) {
+      report(span, "region block cannot return mut/tmp/paused values");
+      return false;
+    }
+    return true;
+  case EscapeTarget::LocalBinding:
+  case EscapeTarget::SpawnArg:
+  case EscapeTarget::ClosureCapture:
+    return true;
+  }
+  return true;
 }
 
 bool Sema::isRegionLocalBinding(const BindingState& binding) const {

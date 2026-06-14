@@ -108,6 +108,89 @@ TEST_CASE("runtime marks frozen bridge") {
   __gura_region_destroy(region);
 }
 
+TEST_CASE("runtime explores and exits a paused region") {
+  Region* region = __gura_region_new_iso(8, RegionStrategy::Arena);
+  __gura_region_explore(region);
+  CHECK(region->state == RegionState::Paused);
+  CHECK(region->bridgeToken.state == BridgeState::PausedRead);
+  __gura_region_explore_exit(region);
+  CHECK(region->state == RegionState::Closed);
+  CHECK(region->bridgeToken.state == BridgeState::ExternalIso);
+  __gura_region_destroy(region);
+}
+
+TEST_CASE("runtime restores outer active region after nested enter") {
+  Region* outer = __gura_region_new_iso(8, RegionStrategy::Arena);
+  Region* inner = __gura_region_new_iso(8, RegionStrategy::Arena);
+  __gura_region_enter(outer);
+  CHECK(outer->state == RegionState::Active);
+  __gura_region_enter(inner);
+  CHECK(outer->state == RegionState::Paused);
+  CHECK(inner->state == RegionState::Active);
+  __gura_region_exit(inner, nullptr);
+  CHECK(inner->state == RegionState::Closed);
+  CHECK(outer->state == RegionState::Active);
+  __gura_region_exit(outer, nullptr);
+  CHECK(outer->state == RegionState::Closed);
+  __gura_region_destroy(outer);
+  __gura_region_destroy(inner);
+}
+
+TEST_CASE("runtime restores outer active region after nested explore") {
+  Region* outer = __gura_region_new_iso(8, RegionStrategy::Arena);
+  Region* inner = __gura_region_new_iso(8, RegionStrategy::Arena);
+  __gura_region_enter(outer);
+  CHECK(outer->state == RegionState::Active);
+  __gura_region_explore(inner);
+  CHECK(outer->state == RegionState::Paused);
+  CHECK(inner->state == RegionState::Paused);
+  __gura_region_explore_exit(inner);
+  CHECK(inner->state == RegionState::Closed);
+  CHECK(outer->state == RegionState::Active);
+  __gura_region_exit(outer, nullptr);
+  CHECK(outer->state == RegionState::Closed);
+  __gura_region_destroy(outer);
+  __gura_region_destroy(inner);
+}
+
+TEST_CASE("runtime rejects out-of-order nested enter exit") {
+  Region* outer = __gura_region_new_iso(8, RegionStrategy::Arena);
+  Region* inner = __gura_region_new_iso(8, RegionStrategy::Arena);
+  __gura_region_enter(outer);
+  __gura_region_enter(inner);
+  CHECK_THROWS(__gura_region_exit(outer, nullptr));
+  __gura_region_exit(inner, nullptr);
+  __gura_region_exit(outer, nullptr);
+  __gura_region_destroy(outer);
+  __gura_region_destroy(inner);
+}
+
+TEST_CASE("runtime rejects out-of-order nested explore exit") {
+  Region* outer = __gura_region_new_iso(8, RegionStrategy::Arena);
+  Region* inner = __gura_region_new_iso(8, RegionStrategy::Arena);
+  __gura_region_enter(outer);
+  __gura_region_explore(inner);
+  CHECK_THROWS(__gura_region_exit(outer, nullptr));
+  __gura_region_explore_exit(inner);
+  __gura_region_exit(outer, nullptr);
+  __gura_region_destroy(outer);
+  __gura_region_destroy(inner);
+}
+
+TEST_CASE("runtime rejects exploring non-closed region") {
+  Region* region = __gura_region_new_iso(8, RegionStrategy::Arena);
+  __gura_region_enter(region);
+  CHECK_THROWS(__gura_region_explore(region));
+  __gura_region_exit(region, nullptr);
+  __gura_region_destroy(region);
+}
+
+TEST_CASE("runtime rejects explore exit outside paused region") {
+  Region* region = __gura_region_new_iso(8, RegionStrategy::Arena);
+  CHECK_THROWS(__gura_region_explore_exit(region));
+  __gura_region_destroy(region);
+}
+
 TEST_CASE("runtime merges closed source into active target") {
   Region* target = __gura_region_new_iso(8, RegionStrategy::Arena);
   Region* source = __gura_region_new_iso(8, RegionStrategy::Arena);
@@ -119,4 +202,14 @@ TEST_CASE("runtime merges closed source into active target") {
   CHECK(target->bridgeToken.state == BridgeState::Merged);
   __gura_region_exit(target, nullptr);
   __gura_region_destroy(target);
+}
+
+TEST_CASE("runtime rejects merge into paused target") {
+  Region* target = __gura_region_new_iso(8, RegionStrategy::Arena);
+  Region* source = __gura_region_new_iso(8, RegionStrategy::Arena);
+  __gura_region_explore(target);
+  CHECK_THROWS(__gura_region_merge(target, source));
+  __gura_region_explore_exit(target);
+  __gura_region_destroy(target);
+  __gura_region_destroy(source);
 }

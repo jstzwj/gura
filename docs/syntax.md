@@ -422,7 +422,7 @@ explore users as u {
 }
 ```
 
-`explore x as y { body }` 可理解为：打开 `x` 后立即把被探索区域置为 paused，并在一个词法受限的临时 active 上下文中执行 `body`。块内 `y` 的类型为 `pau T`，不能写入被探索区域，`tmp`/`pau` 引用不能逃逸，返回值限制与 `enter` 相同。因此被探索区域保持不变式稳定。
+`explore x as y { body }` 可理解为：打开 `x` 后立即把被探索区域置为 paused，并挂起原 active 区域。块内 `y` 的类型为 `pau T`，不能写入被探索区域或外层区域，不能 `new mut`，`tmp`/`pau` 引用不能逃逸，返回值限制与 `enter` 相同。因此被探索区域和外层区域都保持不变式稳定。
 
 ### 13.3 freeze
 
@@ -454,7 +454,7 @@ let account: iso Account = make_account(100)
 let shared: cown Account = cown(move account)
 ```
 
-`cown` 至少支持包装闭合区域 `iso T`。gura 还允许包装深不可变值 `imm T` 和另一个 `cown T`；这两者是 gura 对 Verona `cown` 的扩展。
+`cown` 至少支持包装闭合区域 `iso T`。gura 还允许包装深不可变值 `imm T` 和另一个 `cown T`；这两者是 gura 对 Verona `cown` 的扩展。Core v0 中获取 `cown(imm T)` 只得到 `imm T`，获取 `cown(cown T)` 不会递归获取内部 cown。
 
 ### 14.2 acquire
 
@@ -476,10 +476,13 @@ acquire from as src, to as dst {
 规则：
 
 - `acquire` 块开始前运行时获得所有 cown 的排他访问；
-- 块内绑定类型为 `mut T`；
+- 闭合区域 cown 的块内绑定类型为 `mut T`；
+- `imm` cown 的块内绑定类型为 `imm T`；
 - 块结束时写回闭合区域；
-- 如果有 `mut` 或 `paused` 引用逃逸，释放失败；
-- 多 cown 获取必须使用全序或运行时事务协议避免死锁。
+- 如果有 `mut` 或 `pau` 引用逃逸，释放失败；
+- 多 cown 获取必须使用全序或运行时事务协议避免死锁；
+- 同一 acquire 列表中重复 cown 非法；
+- panic/unwind 路径也必须释放 cown，不能把半开放区域暴露给其他线程。
 
 ### 14.3 spawn
 

@@ -183,6 +183,28 @@ fn main(): i64 {
   CHECK(ir.find("@__gura_region_exit") != std::string::npos);
 }
 
+TEST_CASE("codegen emits explore runtime calls") {
+  const std::string ir = emitSource(R"gura(
+struct Box {
+  var value: i64
+}
+
+fn main(): i64 {
+  let r: iso Box = new iso Box { value: 1 }
+  explore r as bridge {
+    let x = bridge.value
+  }
+  return 0
+}
+)gura");
+
+  CHECK(ir.find("@__gura_region_explore") != std::string::npos);
+  CHECK(ir.find("@__gura_region_explore_exit") != std::string::npos);
+  CHECK(ir.find("@__gura_region_bridge") != std::string::npos);
+  CHECK(ir.find("@__gura_region_enter") == std::string::npos);
+  CHECK(ir.find("@__gura_region_exit") == std::string::npos);
+}
+
 TEST_CASE("codegen sets bridge type metadata") {
   const std::string ir = emitSource(R"gura(
 struct Box {

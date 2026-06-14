@@ -13,6 +13,30 @@ gura 可分为四个语义层：
 
 规范重点是第 2 和第 3 层的交互。
 
+### 1.1 Core Gura v0 安全边界
+
+Core Gura v0 先收敛到一个可实现、可检查、可逐步形式化的安全子集。凡是本节禁止或保留的能力，后续版本必须先补充静态规则、动态语义和安全性证明，再进入安全语言。
+
+v0 支持：
+
+- `mut`、`tmp`、`iso`、`imm`、`pau`、`cown` 引用能力；
+- `new mut`、`new tmp`、`new iso`、`new imm`；
+- `enter`、`explore`、`freeze`、`merge`；
+- 单 cown 或多 cown 的排他 `acquire`；
+- `spawn`，但参数必须满足 `send_safe`。
+
+v0 明确禁止或保留：
+
+- 闭包、函数值、trait object 捕获 `mut`、`tmp`、`pau` 后逃逸；
+- active explicit region 跨越 `await`，async/await 整体保留；
+- mutable global，顶层可变状态必须通过 `cown` 或后续显式 global-region 设计表达；
+- safe 逐对象 `free`，`Manual` 策略只允许 unsafe 或未来线性证明；
+- 多读者 `acquire read`；
+- 隐式冻结，除非是语言内建且明确列白名单的值；
+- 普通命名 `mut` 对象隐式搬入 `new iso`，除非它是当前表达式中可证明 fresh 的构造树。
+
+v0 的安全性目标是：所有安全程序中，闭合区域的 external uniqueness、开放区域栈的 LIFO 顺序、单一可变窗口、`tmp/pau/mut` 不逃逸和 cown 排他访问都能由静态检查保证；只有字段/槽打开、cown 释放、FFI/unsafe 边界和调试拓扑断言需要运行期检查。
+
 ## 2. 程序实体
 
 ### 2.1 值
@@ -228,7 +252,29 @@ active_region_exists
 - 纯值；
 - `imm`；
 - 被移动的 `iso`，作为嵌套区域；
-- 编译器可证明不会造成逃逸的临时 `mut` 构造值。
+- 当前表达式内的 fresh `mut` 构造树。
+
+fresh `mut` 构造树必须满足：
+
+1. 根对象和所有可达 `mut` 子对象都由本次 `new iso` 参数表达式直接构造；
+2. 构造树中的 `mut` 对象没有被绑定到外部名称、写入外部字段或作为函数调用结果返回后再传入；
+3. 构造树中只能引用纯值、`imm`、被移动的 `iso` 或同一 fresh 构造树内对象；
+4. 构造完成后，这些 `mut` 对象直接归属新 closed 区域，外层 active 区域中不得留下任何 `mut/tmp/pau` 别名。
+
+因此普通命名 `mut` 不能隐式搬入新区域：
+
+```gura
+let n: mut Node = new mut Node(value: 1)
+let box: iso Box = new iso Box(child: n)   // 非法：n 不是 fresh 构造树的一部分
+```
+
+合法写法是直接构造，或先显式闭合为 `iso` 后移动：
+
+```gura
+let box: iso Box = new iso Box(child: new mut Node(value: 1))
+let child: iso Node = new iso Node(value: 1)
+let box2: iso Box = new iso Box(child: move child)
+```
 
 ### 7.4 new imm
 
@@ -242,11 +288,14 @@ active_region_exists
 
 `enter source as binding { body }` 打开 `source` 指向的闭合区域。`binding` 是当前桥对象在块内的可变视图，不是特殊关键字。
 
+`source` 必须是可打开位置或一次性 `iso` 值。进入期间，打开源被埋藏为 `open-borrowed` 状态：块内不能读取、移动、复制、重新打开或强更新同一个 `iso` 槽。退出时，区域重新闭合，打开源恢复为指向当前桥对象的 `iso U`；若打开源不是可恢复位置，则返回值只能使用块结果，不能让临时打开源继续存在。
+
 若：
 
 ```text
-Γ ⊢ source : iso T ⊣ Γ1
-suspend(Γ1) = Γpaused
+Γ ⊢ open_place(source) : OpenSlot[iso T] ⊣ Γ1
+bury_open_source(Γ1, source) = Γopen
+suspend(Γopen) = Γpaused
 Γpaused, binding: BridgeSlot[mut T] ⊢ body : τ ⊣ Γbody
 return_safe(τ)
 no_escape(binding_region, Γbody)
@@ -260,6 +309,23 @@ resolve_bridge(binding, Γbody) = new_bridge : mut U
 ```
 
 `BridgeSlot[mut T]` 表示 `binding` 既可作为 `mut T` 使用，也可作为当前 active 区域的桥槽被强更新。若块内未给 `binding` 赋新值，`resolve_bridge` 返回进入时的桥对象。
+
+打开源分类：
+
+- `let x: iso T`：进入时埋藏 `x`，块内 `x` 不可用；退出时同名绑定恢复为 `iso U`，但只有 `U` 与原绑定类型兼容时合法。
+- `var x: iso T`：进入时埋藏槽内容；退出时槽强更新为 `iso U`，允许桥对象类型改变。
+- `obj.field: iso T` 或 `*slot: iso T`：进入时需要运行期检查目标区域未打开；持有该字段的外层对象在 body 中必须是 paused 或不可写视图，防止打开期间移动区域。
+- 临时 `iso` 值：只能被立即打开，块结束后若没有可恢复存储位置，不允许桥类型改变，也不允许把源值再次使用。
+
+非法：
+
+```gura
+var tree: iso Tree = make_tree()
+enter tree as t {
+    spawn worker(move tree)   // tree 处于 open-borrowed，不能移动
+    enter tree as again { }   // 不能重复打开同一区域
+}
+```
 
 ### 8.1 suspend
 
@@ -335,16 +401,20 @@ enter list as bridge {
 
 ## 9. explore 静态规则
 
-`explore source as binding { body }` 要求 `source: iso T`，块内 `binding: pau T`。动态上，目标区域被打开后立即作为 paused 视图暴露，`body` 在词法受限的临时 active 上下文中执行。
+Core Gura v0 采用严格区域栈语义：`explore source as binding { body }` 与 `enter` 一样会打开 `source` 并挂起原 active 区域，但目标区域以只读 suspended 视图暴露，块内 `binding: pau T`。因此 `explore` body 中没有可写 active 用户区域；它只能读取被探索区域和外层 suspended 区域，创建词法受限的 `tmp` 对象，并返回 `return_safe` 的值。
 
 规则：
 
 - 不能调用 `self: mut` 方法；
 - 不能写入被探索区域；
+- 不能写入外层被 `explore` 挂起的区域；
+- 不能 `new mut` 到任一用户区域，只能创建 `new tmp`；
 - 可以创建 `tmp` 对象保存 paused 引用；
-- `tmp`、`pau` 和指向被探索区域内部的引用不能逃逸；
+- `tmp`、`pau` 和指向被探索区域或外层 suspended 区域内部的引用不能逃逸；
 - 返回值必须 `return_safe`；
-- 被探索区域的不变式在整个块内视为稳定。
+- 被探索区域和外层 suspended 区域的不变式在整个块内视为稳定。
+
+若未来希望支持“保持当前 active 区域可写，同时只读借用另一个 closed region”的轻量查询形式，需要作为独立构造设计，不能与 v0 的 `explore` 混用。该扩展必须额外限制可调用方法、回调、嵌套 `enter` 和引用保存位置。
 
 ## 10. freeze 规则
 
@@ -386,30 +456,44 @@ active_region_exists
 若：
 
 ```text
-Γ ⊢ c : cown T ⊣ Γ1
-suspend(Γ1) = Γpaused
-Γpaused, binding: mut T ⊢ body : τ ⊣ Γbody
+Γ ⊢ c_i : cown T_i ⊣ Γ_i
+all_distinct(c_i)
+acquire_view(c_i) = binding_i : K_i T_i
+suspend(Γ_n) = Γpaused
+Γpaused, binding_i: K_i T_i ⊢ body : τ ⊣ Γbody
 return_safe(τ)
-no_escape(binding_region, Γbody)
+no_escape(acquired_region_i, Γbody)
 ```
 
 则：
 
 ```text
-Γ ⊢ acquire c as binding { body } : τ ⊣ restore(Γ1, Γbody)
+Γ ⊢ acquire c_1 as binding_1, ... { body } : τ ⊣ restore(Γ_n, Γbody)
 ```
 
-释放时运行期检查 cown 内部区域闭合。
+其中 `acquire_view(cown(iso T)) = mut T`，`acquire_view(cown(imm T)) = imm T`，`acquire_view(cown(cown T)) = cown T`。
+
+语义要求：
+
+- 多个 cown 按运行时定义的全序获取，避免死锁；
+- 同一 `acquire` 列表中重复 cown 非法；
+- 对已经在当前线程 acquire 的同一 cown 再次 acquire 非法，除非未来定义显式 reentrant cown；
+- `acquire` 期间 cown 内部 closed region 变为当前线程的 active region 入口，外层 active 区域被挂起；
+- 块正常返回、提前 `return` 或 panic/unwind 时，运行时都必须执行释放路径；
+- 释放时运行期检查 cown 内部区域重新闭合；若闭合失败，程序进入确定性 panic，cown 不得被其他线程观察到半开放状态。
+
+Core v0 中 `cown(imm T)` 的获取绑定为 `imm T`，不进入可写 region；`cown(cown T)` 的获取只返回内部 cown 值，不递归获取。若 acquire 期间允许切换桥对象类型，则 cown 存储槽也必须支持强更新；v0 暂不允许 cown 内部桥类型改变。
 
 ## 13. spawn 规则
 
 ```text
 Γ ⊢ arg_i : τ_i ⊣ Γ_i
 ∀i. send_safe(τ_i)
+no_captured_region_borrows(f)
 Γ ⊢ spawn f(args...) : TaskHandle ⊣ Γ_n
 ```
 
-`iso` 参数必须通过 `move` 传递。`imm` 与 `cown` 参数可共享。
+`iso` 参数必须通过 `move` 传递。`imm` 与 `cown` 参数可共享。`f` 若是函数值或闭包，不能捕获 `mut`、`tmp`、`pau`、open-borrowed `iso` 或 suspended store；v0 可先只允许命名函数作为 `spawn` 目标。
 
 ## 14. 动态语义概要
 
@@ -556,7 +640,51 @@ Eff ::= load(dest, place)
 - 所有内部 `mut/tmp/paused` 引用不能逃逸到释放点之后；
 - cown 释放前执行闭合检查。
 
-## 19. FFI 规范
+## 19. Escape 与 effect 边界
+
+### 19.1 Escape 分类
+
+编译器必须为每个表达式和存储动作计算逃逸类别：
+
+```text
+Escape ::= NoEscape
+         | ReturnValue
+         | StoreInActiveRegion
+         | StoreInTmp
+         | StoreInClosedRegion
+         | SpawnArg
+         | CownStore
+         | Global
+         | ClosureCapture
+```
+
+v0 规则：
+
+- `mut T` 只能 `NoEscape` 或存入同一 active region 内普通对象；
+- `tmp T` 只能 `NoEscape`、`StoreInTmp`，且 tmp 对象生命周期严格包含被存引用；
+- `pau T` 只能 `NoEscape`、`StoreInTmp`，不得存入普通 `mut` 对象、closed region、cown、global 或 closure；
+- `iso T` 可 `ReturnValue`、`SpawnArg`、`CownStore`、`StoreInActiveRegion`，但每次使用必须是 move/swap，不能复制；
+- open-borrowed `iso` 不能逃逸，也不能作为 `spawn` 参数或 closure capture；
+- `imm T` 和纯值可自由返回、共享和捕获。
+
+### 19.2 Effect 集合
+
+函数、方法和闭包在 HIR 中至少携带以下 effect 上界：
+
+```text
+Effect ::= Read | Write | AllocMut | AllocTmp | Enter | Explore | Freeze | Merge | Acquire | Spawn | Unsafe | Ffi | Panic
+```
+
+v0 中 effect 主要用于限制 `pau`/`imm` 方法和闭包逃逸：
+
+- `self: imm` 方法不得具有 `Write` 到程序可见对象的 effect；
+- `self: pau` 方法不得具有 `Write`、`Merge`、`Freeze` 当前 paused region、或保存 `self` 派生引用的 effect；
+- 可被 `spawn` 的函数值必须没有非 send-safe capture；
+- unsafe/FFI 调用必须显式带 `Unsafe` 或 `Ffi` effect，并在边界插入拓扑校验。
+
+Core v0 可以先把 effect 检查实现为保守规则：未知函数调用视为可能 `Write | Enter | Acquire | Spawn | Panic`；只有编译器可见函数体或显式声明的纯/只读函数可在 `pau`/`imm` 上下文中调用。
+
+## 20. FFI 规范
 
 FFI 函数默认视为 unsafe。可通过契约声明能力行为：
 
@@ -573,7 +701,7 @@ FFI 不得：
 - 在未 acquire cown 时访问其内部；
 - 修改 frozen 对象的程序可见状态。
 
-## 20. 编译器诊断要求
+## 21. 编译器诊断要求
 
 错误消息应解释违反的是哪个模型规则：
 
@@ -593,10 +721,13 @@ error[E0304]: cannot return `mut Node` from `enter` block
   help: return an `iso` by moving a closed subregion, or return an `imm` value using `freeze`
 ```
 
-## 21. 未决设计点
+## 22. 未决设计点
 
-1. 是否在首个版本支持 `explore read cown` 多读者模式。
+1. 是否在后续版本支持 `acquire read cown` 多读者模式。
 2. `new imm` 是独立分配还是强制脱糖为 `freeze(new iso ...)`。
 3. 是否提供隐式冻结白名单，例如字符串字面量、类型元数据和小型元组。
 4. `var Store[iso T]` 的表层语法是否暴露解引用操作，或只通过 `move`/赋值表达。
-5. async/await 与区域栈交互：是否禁止 active 区域跨 await，或把任务帧提升为 cown。
+5. async/await 与区域栈交互：v0 禁止 active explicit region 和 `mut/tmp/pau` live value 跨 await；后续可研究把任务帧提升为 cown。
+6. destructor/drop 顺序、panic 语义和 effect 限制。
+7. `imm` 对象的全局 liveness 策略：atomic RC、tracing、epoch 或运行时托管。
+8. 轻量 readonly borrow closed region 是否作为不同于 v0 `explore` 的独立构造加入。

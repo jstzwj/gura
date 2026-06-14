@@ -3,11 +3,19 @@
 #include <atomic>
 #include <cstdlib>
 #include <stdexcept>
+#include <vector>
 
 namespace gura::runtime {
 
 namespace {
 std::atomic<RegionId> nextRegionId{1};
+thread_local std::vector<Region*> regionStack;
+
+void requireStackTop(Region* region, const char* message) {
+  if (regionStack.empty() || regionStack.back() != region) {
+    throw std::runtime_error(message);
+  }
+}
 }
 
 ObjectHeader* __gura_header_for_payload(void* payload) {
@@ -68,6 +76,10 @@ extern "C" void __gura_region_enter(Region* region) {
   if (region == nullptr || region->state != RegionState::Closed) {
     throw std::runtime_error("cannot enter non-closed region");
   }
+  if (!regionStack.empty() && regionStack.back()->state == RegionState::Active) {
+    regionStack.back()->state = RegionState::Paused;
+  }
+  regionStack.push_back(region);
   region->state = RegionState::Active;
   region->bridgeToken.state = BridgeState::ActiveMut;
 }
@@ -76,6 +88,7 @@ extern "C" void __gura_region_exit(Region* region, void* newBridge) {
   if (region == nullptr || region->state != RegionState::Active) {
     throw std::runtime_error("cannot exit non-active region");
   }
+  requireStackTop(region, "cannot exit region that is not on top of the region stack");
   if (newBridge != nullptr) {
     const auto* header = __gura_header_for_payload(newBridge);
     if (header == nullptr || header->regionId != region->id) {
@@ -90,6 +103,35 @@ extern "C" void __gura_region_exit(Region* region, void* newBridge) {
   }
   region->bridgeToken = BridgeToken{region->id, region->bridge, region->bridgeTypeId, BridgeState::ExternalIso};
   region->state = RegionState::Closed;
+  regionStack.pop_back();
+  if (!regionStack.empty() && regionStack.back()->state == RegionState::Paused) {
+    regionStack.back()->state = RegionState::Active;
+  }
+}
+
+extern "C" void __gura_region_explore(Region* region) {
+  if (region == nullptr || region->state != RegionState::Closed) {
+    throw std::runtime_error("cannot explore non-closed region");
+  }
+  if (!regionStack.empty() && regionStack.back()->state == RegionState::Active) {
+    regionStack.back()->state = RegionState::Paused;
+  }
+  regionStack.push_back(region);
+  region->state = RegionState::Paused;
+  region->bridgeToken.state = BridgeState::PausedRead;
+}
+
+extern "C" void __gura_region_explore_exit(Region* region) {
+  if (region == nullptr || region->state != RegionState::Paused) {
+    throw std::runtime_error("cannot exit non-paused region");
+  }
+  requireStackTop(region, "cannot exit explored region that is not on top of the region stack");
+  region->bridgeToken = BridgeToken{region->id, region->bridge, region->bridgeTypeId, BridgeState::ExternalIso};
+  region->state = RegionState::Closed;
+  regionStack.pop_back();
+  if (!regionStack.empty() && regionStack.back()->state == RegionState::Paused) {
+    regionStack.back()->state = RegionState::Active;
+  }
 }
 
 extern "C" void __gura_region_destroy(Region* region) {

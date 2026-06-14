@@ -313,6 +313,18 @@ private:
     return module_.getOrInsertFunction("__gura_region_exit", fnTy);
   }
 
+  llvm::FunctionCallee regionExplore() {
+    auto* ptrTy = llvm::PointerType::getUnqual(context_);
+    auto* fnTy = llvm::FunctionType::get(llvm::Type::getVoidTy(context_), {ptrTy}, false);
+    return module_.getOrInsertFunction("__gura_region_explore", fnTy);
+  }
+
+  llvm::FunctionCallee regionExploreExit() {
+    auto* ptrTy = llvm::PointerType::getUnqual(context_);
+    auto* fnTy = llvm::FunctionType::get(llvm::Type::getVoidTy(context_), {ptrTy}, false);
+    return module_.getOrInsertFunction("__gura_region_explore_exit", fnTy);
+  }
+
   llvm::FunctionCallee regionBridge() {
     auto* ptrTy = llvm::PointerType::getUnqual(context_);
     auto* fnTy = llvm::FunctionType::get(ptrTy, {ptrTy}, false);
@@ -674,8 +686,13 @@ private:
 
   llvm::Value* emitRegion(const ast::RegionExpr& regionExpr) {
     llvm::Value* region = regionExpr.source ? emitExpr(*regionExpr.source) : llvm::ConstantPointerNull::get(llvm::PointerType::getUnqual(context_));
-    builder_.CreateCall(regionEnter(), {region});
-    activeRegions_.push_back(region);
+    const bool isEnter = regionExpr.kind == ast::RegionExpr::Kind::Enter;
+    if (isEnter) {
+      builder_.CreateCall(regionEnter(), {region});
+      activeRegions_.push_back(region);
+    } else {
+      builder_.CreateCall(regionExplore(), {region});
+    }
 
     llvm::Value* bridge = builder_.CreateCall(regionBridge(), {region}, "bridge");
     llvm::Function* function = builder_.GetInsertBlock()->getParent();
@@ -690,13 +707,17 @@ private:
     }
 
     llvm::Value* result = regionExpr.body ? emitBlock(*regionExpr.body) : nullptr;
-    llvm::Value* currentBridge = builder_.CreateLoad(bridgeSlot->getAllocatedType(), bridgeSlot, regionExpr.bindingName + ".bridge");
-    builder_.CreateCall(regionExit(), {region, currentBridge});
+    if (isEnter) {
+      llvm::Value* currentBridge = builder_.CreateLoad(bridgeSlot->getAllocatedType(), bridgeSlot, regionExpr.bindingName + ".bridge");
+      builder_.CreateCall(regionExit(), {region, currentBridge});
+      activeRegions_.pop_back();
+    } else {
+      builder_.CreateCall(regionExploreExit(), {region});
+    }
 
     bridgeSlots_.erase(regionExpr.bindingName);
     pointerValues_.erase(regionExpr.bindingName);
     pointerStructTypes_.erase(regionExpr.bindingName);
-    activeRegions_.pop_back();
     return result;
   }
 

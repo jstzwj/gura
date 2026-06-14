@@ -28,10 +28,32 @@ private:
     RegionLocal,
   };
 
+  enum class BindingAvailability {
+    Available,
+    Moved,
+    OpenBorrowed,
+  };
+
+  enum class BindingView {
+    Normal,
+    Suspended,
+  };
+
+  enum class EscapeTarget {
+    ReturnValue,
+    LocalBinding,
+    OuterBinding,
+    Field,
+    RegionBlockResult,
+    SpawnArg,
+    ClosureCapture,
+  };
+
   struct BindingState {
     Type type;
     bool isVar = false;
-    bool moved = false;
+    BindingAvailability availability = BindingAvailability::Available;
+    BindingView view = BindingView::Normal;
     Span span;
     BindingOrigin origin = BindingOrigin::Ordinary;
     int regionDepth = 0;
@@ -82,12 +104,21 @@ private:
     std::vector<ast::ImportDecl> imports;
   };
 
+  struct SuspendedBinding {
+    std::size_t scopeIndex = 0;
+    std::string name;
+    Type type;
+    BindingView view = BindingView::Normal;
+  };
+
   using GenericEnv = std::unordered_map<std::string, GenericParamInfo>;
 
   void pushScope();
   void popScope();
   void declare(std::string name, BindingState state);
   BindingState* lookup(const std::string& name);
+  std::vector<SuspendedBinding> suspendOuterRegionBindings();
+  void restoreSuspendedBindings(const std::vector<SuspendedBinding>& suspended);
 
   void collectModules(const ast::SourceFile& file);
   void collectStructs(const ast::SourceFile& file);
@@ -113,10 +144,12 @@ private:
   Type checkName(const ast::NameExpr& expr, ValueContext context);
   Type checkMove(const ast::MoveExpr& expr);
   Type checkNew(const ast::NewExpr& expr);
+  bool checkIsoInitializerArg(const ast::Expr& valueExpr, const Type& value, const Type& field, Span valueSpan);
+  bool isFreshMutConstructorExpr(const ast::Expr& expr) const;
   Type checkBinding(const ast::BindingExpr& expr);
   Type checkAssign(const ast::AssignExpr& expr);
   Type checkFieldAccess(const ast::FieldAccessExpr& expr);
-  Type checkFieldAssign(const ast::FieldAccessExpr& target, const Type& value, Span valueSpan);
+  Type checkFieldAssign(const ast::FieldAccessExpr& target, const ast::Expr* valueExpr, const Type& value, Span valueSpan);
   Type checkArrayLiteral(const ast::ArrayLiteralExpr& expr);
   Type checkIndex(const ast::IndexExpr& expr);
   Type checkIndexAssign(const ast::IndexExpr& target, const Type& value, Span valueSpan);
@@ -130,11 +163,18 @@ private:
   Type checkIf(const ast::IfExpr& expr);
   Type checkWhile(const ast::WhileExpr& expr);
   Type checkRegion(const ast::RegionExpr& expr);
+  BindingAvailability openBorrowRegionSource(BindingState* sourceBinding);
+  void restoreRegionSource(BindingState* sourceBinding, BindingAvailability previousAvailability);
   Type checkFreeze(const ast::FreezeExpr& expr);
   Type checkMerge(const ast::MergeExpr& expr);
 
   [[nodiscard]] Type typeFromAst(const ast::TypeRef& type);
   [[nodiscard]] Capability capabilityFromAst(ast::Capability capability) const;
+  [[nodiscard]] Type adaptForSuspendedScope(const Type& type) const;
+  [[nodiscard]] Type adaptFieldAccess(const Type& receiver, const Type& field) const;
+  [[nodiscard]] bool isPlainValueType(const Type& type) const;
+  [[nodiscard]] bool isWritableReceiver(Capability capability) const;
+  bool checkEscape(const Type& value, EscapeTarget target, int targetRegionDepth, Span span);
   [[nodiscard]] bool isRegionLocal(Capability capability) const;
   [[nodiscard]] bool isRegionLocalBinding(const BindingState& binding) const;
   [[nodiscard]] bool sameType(const Type& lhs, const Type& rhs) const;
@@ -152,6 +192,7 @@ private:
   GenericEnv currentGenericParams_;
   Type currentReturnType_{Capability::None, "unit"};
   int regionDepth_ = 0;
+  int mutableRegionDepth_ = 0;
 };
 
 } // namespace gura::hir

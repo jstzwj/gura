@@ -62,6 +62,8 @@ extern "C" void* __gura_region_bridge(Region* region);
 extern "C" void __gura_region_set_bridge_type(Region* region, TypeId typeId);
 extern "C" void __gura_region_enter(Region* region);
 extern "C" void __gura_region_exit(Region* region, void* newBridge);
+extern "C" void __gura_region_explore(Region* region);
+extern "C" void __gura_region_explore_exit(Region* region);
 extern "C" void __gura_region_destroy(Region* region);
 
 } // namespace gura::runtime

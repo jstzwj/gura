@@ -100,6 +100,104 @@ fn main(): i64 {
   CHECK(diagnostics.find("initializer type 'bool' does not match field type 'i64'") != std::string::npos);
 }
 
+TEST_CASE("sema accepts new iso with fresh mut constructor field") {
+  CHECK(checkSource(R"gura(
+struct Node {
+  let value: i64
+}
+
+struct Box {
+  let node: mut Node
+}
+
+fn main(): i64 {
+  let b: iso Box = new iso Box { node: new mut Node { value: 1 } }
+  return 0
+}
+)gura"));
+}
+
+TEST_CASE("sema accepts new iso with moved iso field") {
+  CHECK(checkSource(R"gura(
+struct Node {
+  let value: i64
+}
+
+struct Box {
+  let node: iso Node
+}
+
+fn main(): i64 {
+  let n: iso Node = new iso Node { value: 1 }
+  let b: iso Box = new iso Box { node: move n }
+  return 0
+}
+)gura"));
+}
+
+TEST_CASE("sema rejects new iso with named mut field") {
+  std::string diagnostics;
+  CHECK_FALSE(checkSource(R"gura(
+struct Node {
+  let value: i64
+}
+
+struct Box {
+  let node: mut Node
+}
+
+fn main(): i64 {
+  let n: mut Node = new mut Node { value: 1 }
+  let b: iso Box = new iso Box { node: n }
+  return 0
+}
+)gura", &diagnostics));
+  CHECK(diagnostics.find("new iso initializer requires fresh mut constructor expression") != std::string::npos);
+}
+
+TEST_CASE("sema rejects new iso with function returned mut field") {
+  std::string diagnostics;
+  CHECK_FALSE(checkSource(R"gura(
+struct Node {
+  let value: i64
+}
+
+struct Box {
+  let node: mut Node
+}
+
+fn make_node(): mut Node {
+  return new mut Node { value: 1 }
+}
+
+fn main(): i64 {
+  let b: iso Box = new iso Box { node: make_node() }
+  return 0
+}
+)gura", &diagnostics));
+  CHECK(diagnostics.find("new iso initializer requires fresh mut constructor expression") != std::string::npos);
+}
+
+TEST_CASE("sema rejects new iso with non-moved iso field") {
+  std::string diagnostics;
+  CHECK_FALSE(checkSource(R"gura(
+struct Node {
+  let value: i64
+}
+
+struct Box {
+  let node: iso Node
+}
+
+fn main(): i64 {
+  let n: iso Node = new iso Node { value: 1 }
+  let b: iso Box = new iso Box { node: n }
+  return 0
+}
+)gura", &diagnostics));
+  CHECK(diagnostics.find("cannot copy iso") != std::string::npos);
+}
+
 TEST_CASE("sema accepts iso allocation strategies") {
   CHECK(checkSource(R"gura(
 struct Box {

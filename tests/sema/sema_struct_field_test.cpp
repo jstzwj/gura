@@ -72,6 +72,69 @@ fn main(): i64 {
   CHECK(diagnostics.find("assignment type 'bool' does not match field type 'i64'") != std::string::npos);
 }
 
+TEST_CASE("sema rejects reading iso fields as ordinary values") {
+  std::string diagnostics;
+  CHECK_FALSE(checkSource(R"gura(
+struct Child {
+  var x: i64
+}
+
+struct Parent {
+  var child: iso Child
+}
+
+fn main(): i64 {
+  let child: iso Child = new iso Child
+  var p: mut Parent = new mut Parent { child: move child }
+  let c = p.child
+  return 0
+}
+)gura", &diagnostics));
+  CHECK(diagnostics.find("cannot read iso field 'child'") != std::string::npos);
+}
+
+TEST_CASE("sema rejects assigning iso field without move") {
+  std::string diagnostics;
+  CHECK_FALSE(checkSource(R"gura(
+struct Child {
+  var x: i64
+}
+
+struct Parent {
+  var child: iso Child
+}
+
+fn main(): i64 {
+  let child: iso Child = new iso Child
+  let next: iso Child = new iso Child
+  var p: mut Parent = new mut Parent { child: move child }
+  p.child = next
+  return 0
+}
+)gura", &diagnostics));
+  CHECK(diagnostics.find("assignment to iso field 'child' requires move") != std::string::npos);
+}
+
+TEST_CASE("sema accepts assigning iso field with move") {
+  CHECK(checkSource(R"gura(
+struct Child {
+  var x: i64
+}
+
+struct Parent {
+  var child: iso Child
+}
+
+fn main(): i64 {
+  let child: iso Child = new iso Child
+  let next: iso Child = new iso Child
+  var p: mut Parent = new mut Parent { child: move child }
+  p.child = move next
+  return 0
+}
+)gura"));
+}
+
 TEST_CASE("sema rejects iso field access without enter") {
   std::string diagnostics;
   CHECK_FALSE(checkSource(R"gura(

@@ -496,7 +496,7 @@ ExploreExpr {
 }
 ```
 
-`ExploreExpr` 可以降低成特殊 Region IR，也可脱糖为：打开目标区域为 paused，然后创建临时 active 区域执行 body。
+`ExploreExpr` 在 Core v0 中降低为特殊 Region IR：打开目标区域并以 paused 视图暴露，同时挂起原 active 区域。body 不能写任一用户区域，只能读取 `pau/imm` 视图并创建词法受限的 `tmp` 对象。
 
 HIR 中 `binding` 类型为 `pau T`。
 

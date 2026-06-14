@@ -95,7 +95,7 @@ fn main(): mut Point {
   CHECK(diagnostics.find("region-local value cannot escape its region") != std::string::npos);
 }
 
-TEST_CASE("sema rejects using opened iso source inside region") {
+TEST_CASE("sema rejects moving opened iso source inside region") {
   std::string diagnostics;
   CHECK_FALSE(checkSource(R"gura(
 struct Point {
@@ -111,7 +111,164 @@ fn main(): i64 {
   return 0
 }
 )gura", &diagnostics));
-  CHECK(diagnostics.find("already moved") != std::string::npos);
+  CHECK(diagnostics.find("binding 'p' is currently open-borrowed") != std::string::npos);
+}
+
+TEST_CASE("sema rejects reading opened iso source inside region") {
+  std::string diagnostics;
+  CHECK_FALSE(checkSource(R"gura(
+struct Point {
+  var x: i64
+}
+
+fn main(): i64 {
+  let p: iso Point = new iso Point
+  enter p as q {
+    let copy = p
+    return 0
+  }
+  return 0
+}
+)gura", &diagnostics));
+  CHECK(diagnostics.find("binding 'p' is currently open-borrowed") != std::string::npos);
+}
+
+TEST_CASE("sema rejects reentering opened iso source inside region") {
+  std::string diagnostics;
+  CHECK_FALSE(checkSource(R"gura(
+struct Point {
+  var x: i64
+}
+
+fn main(): i64 {
+  let p: iso Point = new iso Point
+  enter p as q {
+    enter p as again {
+      return 0
+    }
+    return 0
+  }
+  return 0
+}
+)gura", &diagnostics));
+  CHECK(diagnostics.find("binding 'p' is currently open-borrowed") != std::string::npos);
+}
+
+TEST_CASE("sema rejects writing outer enter binding inside nested enter") {
+  std::string diagnostics;
+  CHECK_FALSE(checkSource(R"gura(
+struct Point {
+  var x: i64
+}
+
+fn main(): i64 {
+  let outer: iso Point = new iso Point
+  let inner: iso Point = new iso Point
+  enter outer as o {
+    enter inner as i {
+      o.x = 1
+      return 0
+    }
+    return 0
+  }
+  return 0
+}
+)gura", &diagnostics));
+  CHECK(diagnostics.find("field assignment requires a mut receiver") != std::string::npos);
+}
+
+TEST_CASE("sema rejects writing outer enter binding inside explore") {
+  std::string diagnostics;
+  CHECK_FALSE(checkSource(R"gura(
+struct Point {
+  var x: i64
+}
+
+fn main(): i64 {
+  let outer: iso Point = new iso Point
+  let inner: iso Point = new iso Point
+  enter outer as o {
+    explore inner as i {
+      o.x = 1
+      return 0
+    }
+    return 0
+  }
+  return 0
+}
+)gura", &diagnostics));
+  CHECK(diagnostics.find("field assignment requires a mut receiver") != std::string::npos);
+}
+
+TEST_CASE("sema rejects explore body new mut tail result") {
+  std::string diagnostics;
+  CHECK_FALSE(checkSource(R"gura(
+struct Point {
+  var x: i64
+}
+
+fn main(): i64 {
+  let p: iso Point = new iso Point
+  explore p as q {
+    new mut Point
+  }
+  return 0
+}
+)gura", &diagnostics));
+  CHECK(diagnostics.find("region block cannot return") != std::string::npos);
+}
+
+TEST_CASE("sema rejects storing paused field view in regular field") {
+  std::string diagnostics;
+  CHECK_FALSE(checkSource(R"gura(
+struct Point {
+  var x: i64
+}
+
+struct Holder {
+  var point: mut Point
+}
+
+fn main(): i64 {
+  let outer: iso Holder = new iso Holder
+  let inner: iso Point = new iso Point
+  enter outer as h {
+    explore inner as p {
+      h.point = p
+      return 0
+    }
+    return 0
+  }
+  return 0
+}
+)gura", &diagnostics));
+  CHECK(diagnostics.find("field assignment requires a mut receiver") != std::string::npos);
+}
+
+TEST_CASE("sema rejects passing paused field view to mut parameter") {
+  std::string diagnostics;
+  CHECK_FALSE(checkSource(R"gura(
+struct Point {
+  var x: i64
+}
+
+struct Holder {
+  var point: mut Point
+}
+
+fn take(p: mut Point): i64 {
+  return p.x
+}
+
+fn main(): i64 {
+  let h: iso Holder = new iso Holder
+  explore h as view {
+    return take(view.point)
+  }
+  return 0
+}
+)gura", &diagnostics));
+  CHECK(diagnostics.find("argument 1 type 'Point' does not match expected type 'Point'") != std::string::npos);
 }
 
 TEST_CASE("sema rejects explore bridge reassignment") {
@@ -131,6 +288,68 @@ fn main(): i64 {
 }
 )gura", &diagnostics));
   CHECK(diagnostics.find("cannot assign to let binding") != std::string::npos);
+}
+
+TEST_CASE("sema rejects enter bridge reassignment to tmp value") {
+  std::string diagnostics;
+  CHECK_FALSE(checkSource(R"gura(
+struct Point {
+  var x: i64
+}
+
+fn main(): i64 {
+  let p: iso Point = new iso Point
+  enter p as q {
+    q = new tmp Point
+    return 0
+  }
+  return 0
+}
+)gura", &diagnostics));
+  CHECK(diagnostics.find("enter bridge reassignment requires a mut value") != std::string::npos);
+}
+
+TEST_CASE("sema rejects enter bridge reassignment to imm value") {
+  std::string diagnostics;
+  CHECK_FALSE(checkSource(R"gura(
+struct Point {
+  var x: i64
+}
+
+fn main(): i64 {
+  let p: iso Point = new iso Point
+  enter p as q {
+    q = new imm Point
+    return 0
+  }
+  return 0
+}
+)gura", &diagnostics));
+  CHECK(diagnostics.find("enter bridge reassignment requires a mut value") != std::string::npos);
+}
+
+TEST_CASE("sema rejects enter bridge reassignment to different type") {
+  std::string diagnostics;
+  CHECK_FALSE(checkSource(R"gura(
+struct Point {
+  var x: i64
+}
+
+struct Other {
+  var y: i64
+}
+
+fn main(): i64 {
+  let p: iso Point = new iso Point
+  enter p as q {
+    let other: mut Other = new mut Other
+    q = other
+    return 0
+  }
+  return 0
+}
+)gura", &diagnostics));
+  CHECK(diagnostics.find("enter bridge reassignment must preserve bridge type") != std::string::npos);
 }
 
 TEST_CASE("sema accepts enter bridge reassignment to same mut type") {
